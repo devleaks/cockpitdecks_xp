@@ -1,0 +1,81 @@
+# ###########################################
+#
+# Build
+#
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build]
+include = [
+  "/cockpitdecks_xp"
+]
+
+[tool.hatch.version]
+path = "cockpitdecks_xp/__init__.py"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+
+# ###########################################
+#
+# Project
+#
+[project]
+name = "cockpitdecks_xp"
+
+authors = [
+  { name="Pierre M.", email="pierre@devleaks.be" },
+  { name="Duane Licudi", email="dlicudi@gmail.com" }
+]
+
+description = "Cockpitdecks X-Plane Simulator Interface"
+
+readme = "README.md"
+
+license = {file = "LICENCE"}
+
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Games/Entertainment :: Simulation",
+]
+
+requires-python = ">=3.10"
+
+dependencies = [
+    "cockpitdecks @ git+https://github.com/devleaks/cockpitdecks.git",
+]
+
+dynamic = [
+    "version"
+]
+
+[project.urls]
+Homepage = "https://devleaks.github.io/cockpitdecks-docs/"
+Documentation = "https://devleaks.github.io/cockpitdecks-docs/"
+Issues = "https://github.com/devleaks/cockpitdecks_xp/issues"
+Source = "https://github.com/devleaks/cockpitdecks_xp"
+
+# ###########################################
+#
+# Edit
+#
+[tool.ruff]
+line-length = 160
+docstring-code-format = true
+select = [
+    "E",
+    "F",
+    "W",
+]
+ignore = []
+
+[tool.black]
+line-length = 160
+
+[tool.flake8]
+max-line-length = 160
+
