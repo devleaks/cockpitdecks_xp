@@ -1071,7 +1071,7 @@ class XPlane(Simulator, XPlaneBeacon):
                     logger.error(f"udp_enqueue", exc_info=True)
         self.udp_event = None
         self.set_internal_dataref(path=INTDREF_CONNECTION_STATUS, value=2, cascade=True)
-        logger.debug("..dataref listener terminated")
+        logger.info("..dataref listener terminated")
 
     def strdref_enqueue(self):
         logger.info("starting string dataref listener..")
@@ -1145,7 +1145,7 @@ class XPlane(Simulator, XPlaneBeacon):
         # self.socket_strdref.close()
         # logger.info("..strdref socket closed..")
         self.set_internal_dataref(path=INTDREF_CONNECTION_STATUS, value=3, cascade=True)
-        logger.debug("..string dataref listener terminated")
+        logger.info("..string dataref listener terminated")
 
     # ################################
     # X-Plane Interface
@@ -1345,10 +1345,13 @@ class XPlane(Simulator, XPlaneBeacon):
     #
     def terminate(self):
         logger.debug(f"currently {'not ' if self.udp_event is None else ''}running. terminating..")
+        logger.info("terminating..")
+        logger.info("..stopping dataref emission..")
         self.clean_datarefs_to_monitor()  # stop monitoring all datarefs
-        self.remove_all_datarefs()
-        logger.info("terminating..disconnecting..")
-        self.disconnect()
-        logger.info("..stopping..")
+        logger.info("..stopping dataref receptions..")
         self.stop()
+        logger.info("..deleting datarefs..")
+        self.remove_all_datarefs()
+        logger.info("..disconnecting from simulator..")
+        self.disconnect()
         logger.info("..terminated")
