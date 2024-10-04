@@ -724,6 +724,7 @@ class XPlane(Simulator, XPlaneBeacon):
 
         self.dref_event = None  # thread to read XPPython3 PI_string_datarefs_udp alternate UDP port for string datarefs
         self.dref_thread = None
+        self.dref_timeout = 1
         self._strdref_cache = {}
 
         self.xp_home = environ.get("XP_HOME")
@@ -1074,7 +1075,7 @@ class XPlane(Simulator, XPlaneBeacon):
 
     def strdref_enqueue(self):
         logger.info("starting string dataref listener..")
-        frequency = max(SDL_SOCKET_TIMEOUT, SDL_UPDATE_FREQ)
+        self.dref_timeout = max(SDL_SOCKET_TIMEOUT, SDL_UPDATE_FREQ)
         total_to = 0
         tot_items = 0
         total_reads = 0
@@ -1086,7 +1087,7 @@ class XPlane(Simulator, XPlaneBeacon):
 
         while self.dref_event is not None and not self.dref_event.is_set():
             try:
-                self.socket_strdref.settimeout(frequency)
+                self.socket_strdref.settimeout(self.dref_timeout)
                 data, addr = self.socket_strdref.recvfrom(1024)
                 self.set_internal_dataref(path=INTDREF_CONNECTION_STATUS, value=4, cascade=True)
                 total_to = 0
@@ -1118,13 +1119,13 @@ class XPlane(Simulator, XPlaneBeacon):
                     src_last_ts = ts
 
                 freq = None
-                oldf = frequency
+                oldf = self.dref_timeout
                 if "f" in meta:
                     freq = meta["f"]
                     del meta["f"]
                     if freq is not None and (oldf != (freq + 1)):
-                        frequency = freq + 1
-                        logger.info(f"string dataref listener: {len(data)} strings, adjusted frequency to {frequency} secs")
+                        self.dref_timeout = freq + 1
+                        logger.info(f"string dataref listener: {len(data)} strings, adjusted frequency to {self.dref_timeout} secs")
                 for k, v in data.items():  # simple cache mechanism
                     tot_items = tot_items + 1
                     if k not in self._strdref_cache or (k in self._strdref_cache and self._strdref_cache[k] != v):
@@ -1132,9 +1133,9 @@ class XPlane(Simulator, XPlaneBeacon):
                         self._strdref_cache[k] = v
             except TimeoutError:  # socket timeout
                 total_to = total_to + 1
-                logger.debug(f"string dataref listener: socket timeout ({frequency} secs.) received ({total_to})")
+                logger.debug(f"string dataref listener: socket timeout ({self.dref_timeout} secs.) received ({total_to})")
                 self.set_internal_dataref(path=INTDREF_CONNECTION_STATUS, value=2, cascade=True)
-                frequency = frequency + 1  # may be we are too fast to ask, let's slow down a bit next time...
+                self.dref_timeout = self.dref_timeout + 1  # may be we are too fast to ask, let's slow down a bit next time...
             except:
                 logger.warning(f"strdref_enqueue", exc_info=True)
 
@@ -1328,7 +1329,7 @@ class XPlane(Simulator, XPlaneBeacon):
         if self.dref_event is not None and self.dref_thread is not None:
             self.dref_event.set()
             logger.debug("stopping string dataref listener..")
-            timeout = max(SDL_SOCKET_TIMEOUT, SDL_UPDATE_FREQ)
+            timeout = self.dref_timeout
             logger.debug(f"..asked to stop string dataref listener (this may last {timeout} secs. for UDP socket to timeout)..")
             self.dref_thread.join(timeout)
             if self.dref_thread.is_alive():
