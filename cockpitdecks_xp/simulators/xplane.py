@@ -201,15 +201,21 @@ class Dataref(SimulatorData):
         request = {"req_id": 1, "type": "dataref_set_values", "params": {"datarefs": [{"id": self._xpindex, "value": self.current_value}]}}
         ws.send(json.dumps(request))
 
-    def auto_collect(self):
+    def auto_collect(self, simulator: Simulator):
         if self.collector is None:
-            e = DatarefEvent(sim=self, dataref=self.name, value=self.get_value(), cascade=True)
-            self.collector = threading.Timer(self.update_frequency, self.auto_collect)
+            e = DatarefEvent(sim=self, dataref=self.name, value=self.get_value(simulator=simulator), cascade=True)
+            self.collector = threading.Timer(self.update_frequency, self.auto_collect, args=[simulator])
 
     def cancel_autocollect(self):
         if self.collector is not None:
             self.collector.cancel()
             self.collector = None
+
+
+class StringDataref(Dataref):
+
+    def __init__(self, path: str):
+        Dataref.__init__(self, path=path, is_string=True)
 
 
 class DatarefEvent(SimulatorEvent):
