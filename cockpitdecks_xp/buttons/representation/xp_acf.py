@@ -1,5 +1,6 @@
 """X-Plane Aircraft Information Icon
 """
+
 import logging
 
 from cockpitdecks.buttons.representation.icon import IconText
