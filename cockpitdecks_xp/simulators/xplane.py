@@ -916,6 +916,7 @@ class XPlane(Simulator, XPlaneBeacon):
         logger.debug(f"sending ({self.beacon_data['IP']}, {self.beacon_data['Port']}): {path}={value} ..")
         logger.log(SPAM_LEVEL, f"write_dataref: {path}={value}")
         self.socket.sendto(message, (self.beacon_data["IP"], self.beacon_data["Port"]))
+        # print(">>> written", dataref, value, (self.beacon_data["IP"], self.beacon_data["Port"]))
         logger.debug(".. sent")
         return True
 
@@ -1352,7 +1353,7 @@ class XPlane(Simulator, XPlaneBeacon):
     def terminate(self):
         logger.debug(f"currently {'not ' if self.udp_event is None else ''}running. terminating..")
         logger.info("terminating..")
-        logger.info("..stopping dataref emission..")
+        logger.info("..requesting to stop dataref emission..")
         self.clean_datarefs_to_monitor()  # stop monitoring all datarefs
         logger.info("..stopping dataref receptions..")
         self.stop()
