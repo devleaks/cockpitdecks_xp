@@ -323,7 +323,7 @@ class Command(Instruction):
         self.path = path  # some/command
 
     def __str__(self) -> str:
-        return self.name if self.name is not None else (self.path if self.path is not None else "no command")
+        return self.name + ":" + self.path if self.name is not None else (self.path if self.path is not None else "no command")
 
     def is_valid(self) -> bool:
         return self.path is not None and not self.path.lower() in NOT_A_COMMAND
@@ -1095,7 +1095,7 @@ class XPlane(Simulator, XPlaneBeacon):
         while self.dref_event is not None and not self.dref_event.is_set():
             try:
                 self.socket_strdref.settimeout(self.dref_timeout)
-                data, addr = self.socket_strdref.recvfrom(1024)
+                data, addr = self.socket_strdref.recvfrom(1472)
                 self.set_internal_dataref(path=INTDREF_CONNECTION_STATUS, value=4, cascade=True)
                 total_to = 0
                 total_reads = total_reads + 1
@@ -1103,8 +1103,13 @@ class XPlane(Simulator, XPlaneBeacon):
                 delta = now - last_read_ts
                 total_read_time = total_read_time + delta.microseconds / 1000000
                 last_read_ts = now
-                logger.debug("string dataref listener: got data")  # \n({json.dumps(json.loads(data.decode('utf-8')), indent=2)})
-                data = json.loads(data.decode("utf-8"))
+                logger.debug("string dataref listener: got data")
+                data_decoded = data.decode("utf-8")
+                data = {}
+                try:  # \n({json.dumps(json.loads(data.decode('utf-8')), indent=2)})
+                    data = json.loads(data_decoded)
+                except:
+                    logger.warning(f"string dataref listener: could not decode {data_decoded}")
 
                 meta = data  # older version carried meta data directly in message
                 if "meta" in data:  # some meta data in string values message
