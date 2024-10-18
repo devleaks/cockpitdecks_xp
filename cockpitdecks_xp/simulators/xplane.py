@@ -18,8 +18,8 @@ import requests
 from datetime import datetime, timedelta, timezone
 
 from cockpitdecks import SPAM_LEVEL, CONFIG_KW, AIRCRAFT_CHANGE_MONITORING_DATAREF, DEFAULT_FREQUENCY
-from cockpitdecks.simulator import COCKPITDECKS_DATA_PREFIX
-from cockpitdecks.simulator import Simulator, SimulatorData, CockpitdecksData, Instruction, SimulatorEvent
+from cockpitdecks.data import COCKPITDECKS_DATA_PREFIX, CockpitdecksData
+from cockpitdecks.simulator import Simulator, SimulatorData, SimulatorInstruction, SimulatorEvent
 from cockpitdecks.resources.intdatarefs import INTERNAL_DATAREF
 
 logger = logging.getLogger(__name__)
@@ -275,32 +275,33 @@ NOT_A_COMMAND = [
 ]  # all forced to lower cases
 
 
-class XPlaneInstruction(Instruction):
+class XPlaneInstruction(SimulatorInstruction):
     """An Instruction is sent to the Simulator to execute some action.
 
     [description]
     """
 
-    def __init__(self, name: str, delay: float = 0.0, condition: str | None = None, button=None) -> None:
-        Instruction.__init__(self, name=name, delay=delay, condition=condition, button=button)
+    def __init__(self, name: str, simulator: XPlane, delay: float = 0.0, condition: str | None = None, button=None) -> None:
+        SimulatorInstruction.__init__(self, name=name, simulator=simulator, delay=delay, condition=condition)
 
     @classmethod
-    def new(cls, name, **kwargs):
+    def new(cls, name: str, simulator: XPlane, **kwargs):
         for keyw in ["view", "command"]:
             if keyw in kwargs:
                 cmdargs = kwargs.get(keyw)
                 if type(cmdargs) is str:
                     if kwargs.get("longpress", False):
-                        return BeginEndCommand(name=name, path=cmdargs, delay=kwargs.get("delay", 0.0), condition=kwargs.get("condition"))
+                        return BeginEndCommand(name=name, simulator=simulator, path=cmdargs, delay=kwargs.get("delay", 0.0), condition=kwargs.get("condition"))
                     else:
-                        return Command(name=name, path=cmdargs, delay=kwargs.get("delay", 0.0), condition=kwargs.get("condition"))
+                        return Command(name=name, simulator=simulator, path=cmdargs, delay=kwargs.get("delay", 0.0), condition=kwargs.get("condition"))
                 elif type(cmdargs) in [list, tuple]:
-                    return MacroCommand(name=name, commands=cmdargs)
+                    return MacroCommand(name=name, simulator=simulator, commands=cmdargs)
         if "set_dataref" in kwargs:
             cmdargs = kwargs.get("set_dataref")
             if type(cmdargs) is str:
                 return SetDataref(
                     name=name,
+                    simulator=simulator,
                     path=cmdargs,
                     value=kwargs.get("value"),
                     formula=kwargs.get("formula"),
@@ -308,18 +309,29 @@ class XPlaneInstruction(Instruction):
                     condition=kwargs.get("condition"),
                 )
         else:
-            logger.warning(f"Instruction {name}: invalid argument {kwargs}")
+            if not kwargs.get("silence", False):
+                logger.warning(f"Instruction {name}: invalid argument {kwargs}")
         return None
 
+    def _check_condition(self) -> bool:
+        if self.condition is None:
+            return True
+        if self._button is None:
+            logger.warning(f"instruction {self.name} has condition but no button")
+            return True  # no condition
+        value = self._button._value.execute_formula(self.condition)
+        logger.debug(f"instruction {self.name}: {self.condition} = {value} ({value != 0})")
+        return value != 0
 
-class Command(Instruction):
+
+class Command(XPlaneInstruction):
     """
     A Button activation will instruct the simulator software to perform an action.
     A Command is the message that the simulation sofware is expecting to perform that action.
     """
 
-    def __init__(self, path: str | None, name: str | None = None, delay: float = 0.0, condition: str | None = None):
-        Instruction.__init__(self, name=name, delay=delay, condition=condition)
+    def __init__(self, simulator: XPlane, path: str | None, name: str | None = None, delay: float = 0.0, condition: str | None = None):
+        XPlaneInstruction.__init__(self, name=name, simulator=simulator, delay=delay, condition=condition)
         self.path = path  # some/command
 
     def __str__(self) -> str:
@@ -328,8 +340,8 @@ class Command(Instruction):
     def is_valid(self) -> bool:
         return self.path is not None and not self.path.lower() in NOT_A_COMMAND
 
-    def _execute(self, simulator: Simulator):
-        simulator.execute_command(command=self)
+    def _execute(self):
+        self.simulator.execute_command(command=self)  # does not exist...
         self.clean_timer()
 
 
@@ -339,34 +351,43 @@ class BeginEndCommand(Command):
     A Command is the message that the simulation sofware is expecting to perform that action.
     """
 
-    def __init__(self, path: str | None, name: str | None = None, delay: float = 0.0, condition: str | None = None):
-        Command.__init__(self, path=path, name=name, delay=0.0, condition=condition)  # force no delay for commandBegin/End
+    def __init__(self, simulator: XPlane, path: str | None, name: str | None = None, delay: float = 0.0, condition: str | None = None):
+        Command.__init__(self, simulator=simulator, path=path, name=name, delay=0.0, condition=condition)  # force no delay for commandBegin/End
         self.is_on = False
 
-    def _execute(self, simulator: Simulator):
+    def _execute(self):
         if self.is_on:
-            simulator.command_end(command=self)
+            self._simulator.command_end(command=self)
             self.is_on = False
         else:
-            simulator.command_begin(command=self)
+            self._simulator.command_begin(command=self)
             self.is_on = True
         self.clean_timer()
 
 
-class SetDataref(Instruction):
+class SetDataref(XPlaneInstruction):
     """
     A Button activation will instruct the simulator software to perform an action.
     A Command is the message that the simulation sofware is expecting to perform that action.
     """
 
-    def __init__(self, path: str, value=None, formula: str | None = None, delay: float = 0.0, condition: str | None = None):
-        Instruction.__init__(self, name=path, delay=delay, condition=condition)
+    def __init__(self, simulator: XPlane, path: str, value=None, formula: str | None = None, delay: float = 0.0, condition: str | None = None):
+        XPlaneInstruction.__init__(self, name=path, simulator=simulator, delay=delay, condition=condition)
         self.path = path  # some/command
         self.formula = None  # = formula: later, a set-dataref specific formula, different from the button one?
         self._value = value
+        self._button = None
 
     def __str__(self) -> str:
         return "set-dataref: " + self.name
+
+    @property
+    def button(self):
+        return self._button
+
+    @button.setter
+    def button(self, button):
+        self._button = button
 
     @property
     def value(self):
@@ -379,58 +400,58 @@ class SetDataref(Instruction):
     def compute_value(self):
         if self._button is not None:
             return self._button.value.execute_formula(self.formula)
-        loggerInstr.warning(f"SetDataref {name}: no button")
+        logger.warning(f"SetDataref {self.name}: no button")
         return None
 
-    def _execute(self, simulator: Simulator):
+    def _execute(self):
         if self.formula is not None:
             self._value = self.compute_value()
-        simulator.write_dataref(dataref=self.path, value=self.value)
+        self._simulator.write_dataref(dataref=self.path, value=self.value)
 
 
-class MacroCommand(Instruction):
-    """
-    A Button activation will instruct the simulator software to perform an action.
-    A Command is the message that the simulation sofware is expecting to perform that action.
-    """
+# class MacroCommand(Instruction):
+#     """
+#     A Button activation will instruct the simulator software to perform an action.
+#     A Command is the message that the simulation sofware is expecting to perform that action.
+#     """
 
-    def __init__(self, name: str, commands: dict):
-        Instruction.__init__(self, name=name)
-        self.commands = commands
-        self._commands = []
-        self.init()
+#     def __init__(self, name: str, commands: dict):
+#         Instruction.__init__(self, name=name)
+#         self.commands = commands
+#         self._commands = []
+#         self.init()
 
-    def __str__(self) -> str:
-        return self.name + f"({', '.join([c.name for c in self._commands])}"
+#     def __str__(self) -> str:
+#         return self.name + f"({', '.join([c.name for c in self._commands])}"
 
-    @property
-    def button(self):
-        return self._button
+#     @property
+#     def button(self):
+#         return self._button
 
-    @button.setter
-    def button(self, button):
-        self._button = button
-        for command in self._commands:
-            command._button = button
+#     @button.setter
+#     def button(self, button):
+#         self._button = button
+#         for command in self._commands:
+#             command._button = button
 
-    def init(self):
-        self._commands = []
-        for c in self.commands:
-            if CONFIG_KW.COMMAND.value in c:
-                if CONFIG_KW.SET_SIM_DATUM.value in c:
-                    loggerInstr.warning(f"Macro command {self.name}: command has both command and set-dataref, ignored")
-                    continue
-                self._commands.append(
-                    Command(path=c.get(CONFIG_KW.COMMAND.value), delay=c.get(CONFIG_KW.DELAY.value, 0.0), condition=c.get(CONFIG_KW.CONDITION.value))
-                )
-            elif CONFIG_KW.SET_SIM_DATUM.value in c:
-                self._commands.append(
-                    SetDataref(path=c.get(CONFIG_KW.SET_SIM_DATUM.value), delay=c.get(CONFIG_KW.DELAY.value, 0.0), condition=c.get(CONFIG_KW.CONDITION.value))
-                )
+#     def init(self):
+#         self._commands = []
+#         for c in self.commands:
+#             if CONFIG_KW.COMMAND.value in c:
+#                 if CONFIG_KW.SET_SIM_DATUM.value in c:
+#                     loggerInstr.warning(f"Macro command {self.name}: command has both command and set-dataref, ignored")
+#                     continue
+#                 self._commands.append(
+#                     Command(path=c.get(CONFIG_KW.COMMAND.value), delay=c.get(CONFIG_KW.DELAY.value, 0.0), condition=c.get(CONFIG_KW.CONDITION.value))
+#                 )
+#             elif CONFIG_KW.SET_SIM_DATUM.value in c:
+#                 self._commands.append(
+#                     SetDataref(path=c.get(CONFIG_KW.SET_SIM_DATUM.value), delay=c.get(CONFIG_KW.DELAY.value, 0.0), condition=c.get(CONFIG_KW.CONDITION.value))
+#                 )
 
-    def _execute(self, simulator: Simulator):
-        for command in self._commands:
-            command.execute(simulator)
+#     def _execute(self):
+#         for command in self._commands:
+#             self._simulator.execute(command=self)
 
 
 # #############################################
@@ -784,12 +805,21 @@ class XPlane(Simulator, XPlaneBeacon):
             self.add_dataref_to_monitor(next(iter(self.datarefs.values())), freq=0)
         self.disconnect()
 
-    def create_instruction(self, name, **kwargs):
-        return XPlaneInstruction.new(name=name, **kwargs)
+    # ################################
+    # Factories
+    #
+    def instruction_factory(self, name, **kwargs):
+        return XPlaneInstruction.new(name=name, simulator=self, **kwargs)
 
-    def create_replay_event(self, name: str, value):
+    def simulator_data_factory(self, name: str, data_type: str = "float", physical_unit: str = "") -> SimulatorData:
+        return self.get_dataref(path=name, is_string=data_type in ["string", "str", str])
+
+    def replay_event_factory(self, name: str, value):
         return DatarefEvent(sim=self, dataref=name, value=value, cascade=True, autorun=False)
 
+    # ################################
+    # Others
+    #
     @property
     def api_url(self) -> str | None:
         if self.connected:
