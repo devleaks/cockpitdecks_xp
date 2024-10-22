@@ -1197,13 +1197,13 @@ class XPlane(Simulator, XPlaneBeacon):
 
     def command_begin(self, command: Command):
         if command.path is not None:
-            self.execute_command(Command(command.path + "/begin"))
+            self.execute_command(Command(path=command.path + "/begin", simulator=self, name="BeginCommand:" + command.path))
         else:
             logger.warning(f"no command")
 
     def command_end(self, command: Command):
         if command.path is not None:
-            self.execute_command(Command(command.path + "/end"))
+            self.execute_command(Command(path=command.path + "/end", simulator=self, name="EndCommand:" + command.path))
         else:
             logger.warning(f"no command")
 
