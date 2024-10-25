@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 
 from cockpitdecks import SPAM_LEVEL, CONFIG_KW, AIRCRAFT_CHANGE_MONITORING_DATAREF, DEFAULT_FREQUENCY
 from cockpitdecks.data import COCKPITDECKS_DATA_PREFIX, CockpitdecksData
-from cockpitdecks.simulator import Simulator, SimulatorData, SimulatorInstruction, SimulatorEvent
+from cockpitdecks.simulator import Simulator, SimulatorData, SimulatorInstruction, SimulatorMacroInstruction, SimulatorEvent
 from cockpitdecks.resources.intdatarefs import INTERNAL_DATAREF
 
 logger = logging.getLogger(__name__)
@@ -295,7 +295,7 @@ class XPlaneInstruction(SimulatorInstruction):
                     else:
                         return Command(name=name, simulator=simulator, path=cmdargs, delay=kwargs.get("delay", 0.0), condition=kwargs.get("condition"))
                 elif type(cmdargs) in [list, tuple]:
-                    return MacroCommand(name=name, simulator=simulator, commands=cmdargs)
+                    return SimulatorMacroInstruction(name=name, simulator=simulator, instructions=cmdargs)
         if "set_dataref" in kwargs:
             cmdargs = kwargs.get("set_dataref")
             if type(cmdargs) is str:
@@ -1054,23 +1054,6 @@ class XPlane(Simulator, XPlaneBeacon):
                                         value=diff,
                                         cascade=(total_reads % 2 == 0),
                                     )
-
-                                # Need to investigate why this does not work:
-                                #
-                                # dref = self.get_dataref(d)
-                                # if dref is not None:
-                                #     dref.update_value(new_value=value, cascade=False) # just store new value
-                                #     if dref.has_changed():
-                                #         e = DatarefEvent(
-                                #             sim=self,
-                                #             dataref=d,
-                                #             value=value,
-                                #             cascade=d in self.simulator_data_to_monitor.keys(),
-                                #         )
-                                #         self.inc(INTERNAL_DATAREF.UPDATE_ENQUEUED.value)
-                                # else:
-                                #     logger.warning(f"dataref {d} not found")
-                                #
 
                                 v = value
                                 r = self.get_rounding(simulator_data_name=d)
