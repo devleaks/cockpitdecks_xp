@@ -313,16 +313,6 @@ class XPlaneInstruction(SimulatorInstruction):
                 logger.warning(f"Instruction {name}: invalid argument {kwargs}")
         return None
 
-    def _check_condition(self) -> bool:
-        if self.condition is None:
-            return True
-        if self._button is None:
-            logger.warning(f"instruction {self.name} has condition but no button")
-            return True  # no condition
-        value = self._button._value.execute_formula(self.condition)
-        logger.debug(f"instruction {self.name}: {self.condition} = {value} ({value != 0})")
-        return value != 0
-
 
 class Command(XPlaneInstruction):
     """
