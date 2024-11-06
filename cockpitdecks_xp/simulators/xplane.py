@@ -17,7 +17,7 @@ import requests
 
 from datetime import datetime, timedelta, timezone
 
-from cockpitdecks import SPAM_LEVEL, CONFIG_KW, AIRCRAFT_CHANGE_MONITORING_DATAREF, DEFAULT_FREQUENCY
+from cockpitdecks import SPAM_LEVEL, CONFIG_KW, AIRCRAFT_CHANGE_MONITORING_DATAREF, DEFAULT_FREQUENCY, MONITOR_DATAREF_USAGE
 from cockpitdecks.data import COCKPITDECKS_DATA_PREFIX, CockpitdecksData
 from cockpitdecks.simulator import Simulator, SimulatorData, SimulatorInstruction, SimulatorMacroInstruction, SimulatorEvent
 from cockpitdecks.resources.intdatarefs import INTERNAL_DATAREF
@@ -32,8 +32,6 @@ logger = logging.getLogger(__name__)
 #
 # A velue in X-Plane Simulator
 PATTERN_INTDREF = f"\\${{{COCKPITDECKS_DATA_PREFIX}([^\\}}]+?)}}"
-
-MONITOR_DATAREF_USAGE = False
 
 # REST API model keywords
 REST_DATA = "data"
@@ -763,13 +761,9 @@ class XPlane(Simulator, XPlaneBeacon):
         if self._inited:
             return
 
-        # Register special datarefs for internal monitoring
-        dref = self.get_dataref(AIRCRAFT_CHANGE_MONITORING_DATAREF, is_string=True)
-        dref.add_listener(self.cockpit)  # Wow wow wow
-        logger.info(f"aircraft dataref is {AIRCRAFT_CHANGE_MONITORING_DATAREF}")
-
-        self.add_datetime_datarefs()
-
+        # Installs datarefs that always need to be returned
+        # because they are used internally by Cockpitdecks
+        self.add_always_monitored_datarefs()
         self.set_internal_dataref(path=INTDREF_CONNECTION_STATUS, value=0, cascade=True)
 
         # Setup socket reception for string-datarefs
@@ -834,12 +828,31 @@ class XPlane(Simulator, XPlaneBeacon):
 
     #
     # Datarefs
+    def add_always_monitored_datarefs(self):
+        self.add_cockpit_datarefs()
+        self.add_datetime_datarefs()
+
+    def add_cockpit_datarefs(self):
+        """Cockpit datarefs are always requested and used internaly by the Cockpit
+        """
+        dtdrefs = {}
+        for d in self.cockpit.get_simulator_data():
+            dtdrefs[d] = self.get_dataref(d)
+            dtdrefs[d].add_listener(self.cockpit)
+        self.add_datarefs_to_monitor(dtdrefs)
+        logger.info(f"monitoring {len(dtdrefs)} cockpit datarefs")
+
     def add_datetime_datarefs(self):
+        """Date/time datarefs are always requested and made available to the entire
+           application. Any activation or representation can use them.
+           They are used internally by the X-Plane simulator to monitor its responsiveness.
+        """
         dtdrefs = {}
         for d in DATETIME_DATAREFS:
             dtdrefs[d] = self.get_dataref(d)
+            # so far, nobody is interested in being notified
         self.add_datarefs_to_monitor(dtdrefs)
-        logger.info("monitoring simulator date/time datarefs")
+        logger.info(f"monitoring {len(dtdrefs)} simulator date/time datarefs")
 
     def datetime(self, zulu: bool = False, system: bool = False) -> datetime:
         """Returns the simulator date and time"""
@@ -1267,7 +1280,7 @@ class XPlane(Simulator, XPlaneBeacon):
             logger.warning("no connection")
             return
         # Add always monitored drefs
-        self.add_datetime_datarefs()
+        self.add_always_monitored_datarefs()
         # Add those to monitor
         prnt = []
         for path in self.simulator_data_to_monitor.keys():
