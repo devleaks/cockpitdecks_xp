@@ -17,6 +17,7 @@ import requests
 
 from datetime import datetime, timedelta, timezone
 
+from cockpitdecks_xp import __version__
 from cockpitdecks import SPAM_LEVEL, CONFIG_KW, AIRCRAFT_CHANGE_MONITORING_DATAREF, DEFAULT_FREQUENCY, MONITOR_DATAREF_USAGE
 from cockpitdecks.data import COCKPITDECKS_DATA_PREFIX, CockpitdecksData
 from cockpitdecks.simulator import Simulator, SimulatorData, SimulatorInstruction, SimulatorMacroInstruction, SimulatorEvent
@@ -788,6 +789,9 @@ class XPlane(Simulator, XPlaneBeacon):
         for i in range(len(self.datarefs)):
             self.add_dataref_to_monitor(next(iter(self.datarefs.values())), freq=0)
         self.disconnect()
+
+    def get_version(self) -> list:
+        return [f"{type(self).__name__} {__version__}"]
 
     # ################################
     # Factories
