@@ -837,8 +837,7 @@ class XPlane(Simulator, XPlaneBeacon):
         self.add_datetime_datarefs()
 
     def add_cockpit_datarefs(self):
-        """Cockpit datarefs are always requested and used internaly by the Cockpit
-        """
+        """Cockpit datarefs are always requested and used internaly by the Cockpit"""
         dtdrefs = {}
         for d in self.cockpit.get_simulator_data():
             dtdrefs[d] = self.get_dataref(d)
@@ -848,8 +847,8 @@ class XPlane(Simulator, XPlaneBeacon):
 
     def add_datetime_datarefs(self):
         """Date/time datarefs are always requested and made available to the entire
-           application. Any activation or representation can use them.
-           They are used internally by the X-Plane simulator to monitor its responsiveness.
+        application. Any activation or representation can use them.
+        They are used internally by the X-Plane simulator to monitor its responsiveness.
         """
         dtdrefs = {}
         for d in DATETIME_DATAREFS:
