@@ -147,6 +147,7 @@ class Dataref(SimulatorData):
             response = requests.get(url)
             data = response.json()
             if REST_DATA in data:
+                print(">>>>>>>", self.name, self.is_string)
                 if self.is_string:
                     if type(data[REST_DATA]) in [str, bytes]:
                         return base64.b64decode(data[REST_DATA])[:-1].decode("ascii")
@@ -840,7 +841,11 @@ class XPlane(Simulator, XPlaneBeacon):
         """Cockpit datarefs are always requested and used internaly by the Cockpit"""
         dtdrefs = {}
         for d in self.cockpit.get_simulator_data():
-            dtdrefs[d] = self.get_dataref(d)
+            if d.startswith(CONFIG_KW.STRING_PREFIX.value):
+                d = d.replace(CONFIG_KW.STRING_PREFIX.value, "")
+                dtdrefs[d] = self.get_dataref(d, is_string=True)
+            else:
+                dtdrefs[d] = self.get_dataref(d)
             dtdrefs[d].add_listener(self.cockpit)
         self.add_datarefs_to_monitor(dtdrefs)
         logger.info(f"monitoring {len(dtdrefs)} cockpit datarefs")
