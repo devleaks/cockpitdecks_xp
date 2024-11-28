@@ -147,7 +147,7 @@ class Dataref(SimulatorData):
             response = requests.get(url)
             data = response.json()
             if REST_DATA in data:
-                print(">>>>>>>", self.name, self.is_string)
+                # print(">>>>>>>", self.name, self.is_string)
                 if self.is_string:
                     if type(data[REST_DATA]) in [str, bytes]:
                         return base64.b64decode(data[REST_DATA])[:-1].decode("ascii")
