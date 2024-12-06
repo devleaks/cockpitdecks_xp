@@ -18,9 +18,10 @@ import requests
 from datetime import datetime, timedelta, timezone
 
 from cockpitdecks_xp import __version__
-from cockpitdecks import SPAM_LEVEL, CONFIG_KW, AIRCRAFT_CHANGE_MONITORING_DATAREF, DEFAULT_FREQUENCY, MONITOR_DATAREF_USAGE
+from cockpitdecks import SPAM_LEVEL, CONFIG_KW, DEFAULT_FREQUENCY, MONITOR_DATAREF_USAGE
 from cockpitdecks.data import COCKPITDECKS_DATA_PREFIX, CockpitdecksData
-from cockpitdecks.simulator import Simulator, SimulatorData, SimulatorInstruction, SimulatorMacroInstruction, SimulatorEvent
+from cockpitdecks.simulator import Simulator, SimulatorEvent, SimulatorInstruction, SimulatorMacroInstruction
+from cockpitdecks.simulator import SimulatorData, SimulatorDataListener, SimulatorDataConsumer
 from cockpitdecks.resources.intdatarefs import INTERNAL_DATAREF
 
 logger = logging.getLogger(__name__)
@@ -399,51 +400,6 @@ class SetDataref(XPlaneInstruction):
         self._simulator.write_dataref(dataref=self.path, value=self.value)
 
 
-# class MacroCommand(Instruction):
-#     """
-#     A Button activation will instruct the simulator software to perform an action.
-#     A Command is the message that the simulation sofware is expecting to perform that action.
-#     """
-
-#     def __init__(self, name: str, commands: dict):
-#         Instruction.__init__(self, name=name)
-#         self.commands = commands
-#         self._commands = []
-#         self.init()
-
-#     def __str__(self) -> str:
-#         return self.name + f"({', '.join([c.name for c in self._commands])}"
-
-#     @property
-#     def button(self):
-#         return self._button
-
-#     @button.setter
-#     def button(self, button):
-#         self._button = button
-#         for command in self._commands:
-#             command._button = button
-
-#     def init(self):
-#         self._commands = []
-#         for c in self.commands:
-#             if CONFIG_KW.COMMAND.value in c:
-#                 if CONFIG_KW.SET_SIM_DATUM.value in c:
-#                     loggerInstr.warning(f"Macro command {self.name}: command has both command and set-dataref, ignored")
-#                     continue
-#                 self._commands.append(
-#                     Command(path=c.get(CONFIG_KW.COMMAND.value), delay=c.get(CONFIG_KW.DELAY.value, 0.0), condition=c.get(CONFIG_KW.CONDITION.value))
-#                 )
-#             elif CONFIG_KW.SET_SIM_DATUM.value in c:
-#                 self._commands.append(
-#                     SetDataref(path=c.get(CONFIG_KW.SET_SIM_DATUM.value), delay=c.get(CONFIG_KW.DELAY.value, 0.0), condition=c.get(CONFIG_KW.CONDITION.value))
-#                 )
-
-#     def _execute(self):
-#         for command in self._commands:
-#             self._simulator.execute(command=self)
-
-
 # #############################################
 # SIMULATOR
 #
@@ -716,7 +672,7 @@ class XPlaneBeacon:
                 logger.debug("..not connected")
 
 
-class XPlane(Simulator, XPlaneBeacon):
+class XPlane(Simulator, SimulatorDataListener, SimulatorDataConsumer, XPlaneBeacon):
     """
     Get data from XPlane via network.
     Use a class to implement RAI Pattern for the UDP socket.
@@ -799,12 +755,15 @@ class XPlane(Simulator, XPlaneBeacon):
     # Factories
     #
     def instruction_factory(self, name, **kwargs):
+        logger.debug(f"creating xplane instruction {name}")
         return XPlaneInstruction.new(name=name, simulator=self, **kwargs)
 
     def simulator_data_factory(self, name: str, data_type: str = "float", physical_unit: str = "") -> SimulatorData:
+        logger.debug(f"creating xplane data {name}")
         return self.get_dataref(path=name, is_string=data_type in ["string", "str", str])
 
     def replay_event_factory(self, name: str, value):
+        logger.debug(f"creating replay event {name}")
         return DatarefEvent(sim=self, dataref=name, value=value, cascade=True, autorun=False)
 
     # ################################
@@ -834,9 +793,17 @@ class XPlane(Simulator, XPlaneBeacon):
 
     #
     # Datarefs
+    def get_simulator_data(self) -> set:
+        """Returns the list of datarefs for which the xplane simulator wants to be notified."""
+        ret = set(PERMANENT_SIMULATOR_DATA)
+        return ret
+
+    def simulator_data_changed(self, data: SimulatorData):
+        pass
+
     def add_always_monitored_datarefs(self):
         self.add_cockpit_datarefs()
-        self.add_datetime_datarefs()
+        self.add_simulator_datarefs()
 
     def add_cockpit_datarefs(self):
         """Cockpit datarefs are always requested and used internaly by the Cockpit"""
@@ -851,17 +818,25 @@ class XPlane(Simulator, XPlaneBeacon):
         self.add_datarefs_to_monitor(dtdrefs)
         logger.info(f"monitoring {len(dtdrefs)} cockpit datarefs")
 
-    def add_datetime_datarefs(self):
-        """Date/time datarefs are always requested and made available to the entire
-        application. Any activation or representation can use them.
-        They are used internally by the X-Plane simulator to monitor its responsiveness.
-        """
+    def add_simulator_datarefs(self):
+        """Simulator datarefs are always requested and used internaly by the Simulator"""
         dtdrefs = {}
-        for d in DATETIME_DATAREFS:
-            dtdrefs[d] = self.get_dataref(d)
-            # so far, nobody is interested in being notified
+        for d in self.get_simulator_data():
+            if d.startswith(CONFIG_KW.STRING_PREFIX.value):
+                d = d.replace(CONFIG_KW.STRING_PREFIX.value, "")
+                dtdrefs[d] = self.get_dataref(d, is_string=True)
+            else:
+                dtdrefs[d] = self.get_dataref(d)
+            dtdrefs[d].add_listener(self)
         self.add_datarefs_to_monitor(dtdrefs)
-        logger.info(f"monitoring {len(dtdrefs)} simulator date/time datarefs")
+        logger.info(f"monitoring {len(dtdrefs)} simulator datarefs")
+
+    def get_dataref(self, path: str, is_string: bool = False) -> CockpitdecksData | Dataref:
+        if path in self.all_simulator_data.keys():
+            return self.all_simulator_data[path]
+        if Dataref.is_internal_simulator_data(path):  # prevent duplicate prepend
+            return self.register(simulator_data=CockpitdecksData(path, is_string=is_string))
+        return self.register(simulator_data=Dataref(path, is_string=is_string))
 
     def datetime(self, zulu: bool = False, system: bool = False) -> datetime:
         """Returns the simulator date and time"""
@@ -875,13 +850,6 @@ class XPlane(Simulator, XPlaneBeacon):
             simnow = simnow + timedelta(days=days) + timedelta(days=secs)
             return simnow
         return now
-
-    def get_dataref(self, path: str, is_string: bool = False) -> CockpitdecksData | Dataref:
-        if path in self.all_simulator_data.keys():
-            return self.all_simulator_data[path]
-        if Dataref.is_internal_simulator_data(path):  # prevent duplicate prepend
-            return self.register(simulator_data=CockpitdecksData(path, is_string=is_string))
-        return self.register(simulator_data=Dataref(path, is_string=is_string))
 
     # Shortcuts
     def get_internal_dataref(self, path: str, is_string: bool = False):
@@ -1234,12 +1202,6 @@ class XPlane(Simulator, XPlaneBeacon):
             if self.add_dataref_to_monitor(d.name, freq=d.update_frequency):
                 prnt.append(d.name)
 
-        # Add aircraft
-        dref_ipc = self.get_dataref(AIRCRAFT_CHANGE_MONITORING_DATAREF)
-        if self.add_dataref_to_monitor(dref_ipc.name, freq=dref_ipc.update_frequency):
-            prnt.append(dref_ipc.name)
-            super().add_simulator_data_to_monitor({dref_ipc.name: dref_ipc})
-
         logger.log(SPAM_LEVEL, f"add_datarefs_to_monitor: added {prnt}")
         if MONITOR_DATAREF_USAGE:
             logger.info(f">>>>> monitoring++{len(datarefs)}/{len(self.datarefs)}/{self._max_monitored}")
@@ -1263,12 +1225,6 @@ class XPlane(Simulator, XPlaneBeacon):
                     logger.debug(f"{d.name} monitored {self.simulator_data_to_monitor[d.name]} times")
             else:
                 logger.debug(f"no need to remove {d.name}")
-
-        # Add aircraft path
-        dref_ipc = self.get_dataref(AIRCRAFT_CHANGE_MONITORING_DATAREF)
-        if self.add_dataref_to_monitor(dref_ipc.name, freq=0):
-            prnt.append(dref_ipc.name)
-            super().remove_simulator_data_to_monitor({dref_ipc.name: dref_ipc})
 
         logger.debug(f"removed {prnt}")
         super().remove_simulator_data_to_monitor(datarefs)
@@ -1294,11 +1250,14 @@ class XPlane(Simulator, XPlaneBeacon):
         prnt = []
         for path in self.simulator_data_to_monitor.keys():
             d = self.all_simulator_data.get(path)
-            if d is not None and not d.is_string:
-                if self.add_dataref_to_monitor(d.name, freq=d.update_frequency):
-                    prnt.append(d.name)
+            if d is not None:
+                if not d.is_string:
+                    if self.add_dataref_to_monitor(d.name, freq=d.update_frequency):
+                        prnt.append(d.name)
                 else:
-                    logger.warning(f"no dataref {path}")
+                    logger.debug(f"dataref {path} is string dataref, not requested")
+            else:
+                logger.warning(f"no dataref {path}")
         logger.log(SPAM_LEVEL, f"added {prnt}")
 
         # Add collector ticker
@@ -1339,15 +1298,6 @@ class XPlane(Simulator, XPlaneBeacon):
         self.add_all_datarefs_to_monitor()
         logger.info("reloading pages")
         self.cockpit.reload_pages()  # to take into account updated values
-        # this is a test, ignore
-        self.get_init_datarefs()
-
-    def get_init_datarefs(self):
-        # Test function for hastily get some dataref values
-        # through the XP 12.1.1 Web REST API
-        #
-        dref = self.get_dataref(AIRCRAFT_CHANGE_MONITORING_DATAREF, is_string=True)
-        logger.info(f"{dref.name}={dref.get_value(self)}")
 
     def stop(self):
         if self.udp_event is not None:
