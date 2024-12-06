@@ -482,6 +482,7 @@ REPLAY_DATAREFS = [
     "sim/time/sim_speed_actual",
 ]
 
+PERMANENT_SIMULATOR_DATA = DATETIME_DATAREFS + REPLAY_DATAREFS
 
 INTDREF_CONNECTION_STATUS = "_connection_status"
 # Status value:
@@ -1149,7 +1150,7 @@ class XPlane(Simulator, XPlaneBeacon):
                         src_cnt = src_cnt + 1
                         self.collector_avgtime = src_tot / src_cnt
                         if src_cnt % 100 == 0:
-                            logger.info(
+                            logger.debug(
                                 f"string dataref listener: average time between reads {round(self.collector_avgtime, 4)} ({round(tot_items/total_reads,0)})"
                             )
                     src_last_ts = ts
