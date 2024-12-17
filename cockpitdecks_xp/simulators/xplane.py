@@ -51,7 +51,7 @@ class XPlaneData(SimulatorData):
         is_internal = kwargs.get("is_internal", False)
 
         if is_internal or SimulatorData.is_internal_data(name):
-            return InternalData(path=name, is_string=is_string)
+            return InternalData(name=name, is_string=is_string)
 
         return Dataref(path=name, is_string=is_string)
 
@@ -829,7 +829,7 @@ class XPlane(Simulator, SimulatorDataListener, SimulatorDataConsumer, XPlaneBeac
         if name in self.all_simulator_data.keys():
             return self.all_simulator_data[name]
         if SimulatorData.is_internal_data(path=name):
-            return self.register(simulator_data=InternalData(path=name, is_string=is_string))
+            return self.register(simulator_data=InternalData(name=name, is_string=is_string))
         return self.register(simulator_data=Dataref(path=name, is_string=is_string))
 
     def datetime(self, zulu: bool = False, system: bool = False) -> datetime:
