@@ -713,9 +713,6 @@ class XPlane(Simulator, SimulatorDataListener, SimulatorDataConsumer, XPlaneBeac
         if self._inited:
             return
 
-        # Installs datarefs that always need to be returned
-        # because they are used internally by Cockpitdecks
-        self.add_always_monitored_datarefs()
         self.set_internal_data(name=INTDREF_CONNECTION_STATUS, value=0, cascade=True)
 
         # Setup socket reception for string-datarefs
