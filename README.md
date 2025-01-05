@@ -1,10 +1,3 @@
-# Cockpitdecks Decks
+# Cockpitdecks Extenstion for X-Plane Flight Simulator software
 
-This is the implementation files for
- - Stream Decks
- - Loupedeck
- - Berhinger X-Touch Mini
-
- These files are used by the Cockpitdecks application
- to implement phydsical decks connections.
- 
+This extension allows Cockpitdecks to connect to Laminar X-Plane Flight Simulator.

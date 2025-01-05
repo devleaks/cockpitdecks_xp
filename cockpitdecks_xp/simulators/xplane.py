@@ -19,10 +19,10 @@ from datetime import datetime, timedelta, timezone
 
 from cockpitdecks_xp import __version__
 from cockpitdecks import SPAM_LEVEL, CONFIG_KW, DEFAULT_FREQUENCY, MONITOR_DATAREF_USAGE
-from cockpitdecks.data import InternalData
+from cockpitdecks.variable import InternalVariable
 from cockpitdecks.simulator import Simulator, SimulatorEvent, SimulatorInstruction, SimulatorMacroInstruction
-from cockpitdecks.simulator import SimulatorData, SimulatorDataListener, SimulatorDataConsumer
-from cockpitdecks.resources.intdatarefs import INTERNAL_DATAREF
+from cockpitdecks.simulator import SimulatorVariable, SimulatorVariableListener, SimulatorVariableConsumer
+from cockpitdecks.resources.intvariables import INTERNAL_DATAREF
 
 logger = logging.getLogger(__name__)
 # logger.setLevel(SPAM_LEVEL)  # To see which dataref are requested
@@ -39,24 +39,24 @@ REST_DATA = "data"
 REST_IDENT = "id"
 
 
-class XPlaneData(SimulatorData):
+class XPlaneVariable(SimulatorVariable):
 
     def __init__(self, path: str, is_string: bool = False):
         # Data
-        SimulatorData.__init__(self, name=path, data_type="string" if is_string else "float")
+        SimulatorVariable.__init__(self, name=path, data_type="string" if is_string else "float")
 
     @classmethod
     def new(cls, name, **kwargs):
         is_string = kwargs.get("is_string", False)
         is_internal = kwargs.get("is_internal", False)
 
-        if is_internal or SimulatorData.is_internal_data(name):
-            return InternalData(name=name, is_string=is_string)
+        if is_internal or SimulatorVariable.is_internal_variable(name):
+            return InternalVariable(name=name, is_string=is_string)
 
         return Dataref(path=name, is_string=is_string)
 
 
-class Dataref(SimulatorData):
+class Dataref(SimulatorVariable):
     """
     A Dataref is an internal value of the simulation software made accessible to outside modules,
     plugins, or other software in general.
@@ -70,7 +70,7 @@ class Dataref(SimulatorData):
 
     def __init__(self, path: str, is_string: bool = False):
         # Data
-        SimulatorData.__init__(self, name=path, data_type="string" if is_string else "float")
+        SimulatorVariable.__init__(self, name=path, data_type="string" if is_string else "float")
 
         self.dataref = path  # some/path/values
         self.index = 0  # 6
@@ -236,7 +236,7 @@ class DatarefEvent(SimulatorEvent):
             if self.sim is None:
                 logger.warning("no simulator")
                 return False
-            dataref = self.sim.all_simulator_data.get(self.dataref_path)
+            dataref = self.sim.all_simulator_variable.get(self.dataref_path)
             if dataref is None:
                 logger.debug(f"dataref {self.dataref_path} not found in database")
                 return
@@ -433,14 +433,6 @@ REPLAY_DATAREFS = [
 
 PERMANENT_SIMULATOR_DATA = DATETIME_DATAREFS + REPLAY_DATAREFS
 
-INTDREF_CONNECTION_STATUS = "_connection_status"
-# Status value:
-# 0: Nothing running
-# 1: Connection monitor running
-# 2: Connection to X-Plane but no more
-# 3: UDP listener running (no timeout)
-# 4: Event forwarder running
-
 
 # XPlaneBeacon
 # Beacon-specific error classes
@@ -462,6 +454,7 @@ class XPlaneBeacon:
     MCAST_GRP = "239.255.1.1"
     MCAST_PORT = 49707  # (MCAST_PORT was 49000 for XPlane10)
     BEACON_TIMEOUT = 3.0  # seconds
+    MAX_WARNING = 3
 
     def __init__(self):
         # Open a UDP Socket to receive on Port 49000
@@ -474,10 +467,18 @@ class XPlaneBeacon:
 
         self.should_not_connect = None  # threading.Event()
         self.connect_thread = None  # threading.Thread()
+        self._already_warned = 0
 
     @property
     def connected(self):
-        return "IP" in self.beacon_data.keys()
+        res = "IP" in self.beacon_data.keys()
+        if not res and not self._already_warned > self.MAX_WARNING:
+            if self._already_warned == self.MAX_WARNING:
+                logger.warning("no connection (last warning)")
+            else:
+                logger.warning("no connection")
+            self._already_warned = self._already_warned + 1
+        return res
 
     def FindIp(self):
         """
@@ -598,6 +599,7 @@ class XPlaneBeacon:
                 try:
                     self.FindIp()
                     if self.connected:
+                        self._already_warned = 0
                         logger.info(f"beacon: {self.beacon_data}")
                         if "XPlaneVersion" in self.beacon_data:
                             curr = self.beacon_data["XPlaneVersion"]
@@ -606,6 +608,7 @@ class XPlaneBeacon:
                                 logger.warning(f"Some features in Cockpitdecks may not work properly")
                             else:
                                 logger.info(f"X-Plane version {curr} meets minima (>={XP_MIN_VERSION})")
+                                logger.info(f"connected")
                         logger.debug("..connected, starting dataref listener..")
                         self.start()
                         self.inc(INTERNAL_DATAREF.STARTS.value)
@@ -665,7 +668,7 @@ class XPlaneBeacon:
                 logger.debug("..not connected")
 
 
-class XPlane(Simulator, SimulatorDataListener, SimulatorDataConsumer, XPlaneBeacon):
+class XPlane(Simulator, SimulatorVariableListener, SimulatorVariableConsumer, XPlaneBeacon):
     """
     Get data from XPlane via network.
     Use a class to implement RAI Pattern for the UDP socket.
@@ -713,7 +716,7 @@ class XPlane(Simulator, SimulatorDataListener, SimulatorDataConsumer, XPlaneBeac
         if self._inited:
             return
 
-        self.set_internal_data(name=INTDREF_CONNECTION_STATUS, value=0, cascade=True)
+        self.set_internal_variable(name=INTERNAL_DATAREF.INTDREF_CONNECTION_STATUS.value, value=0, cascade=True)
 
         # Setup socket reception for string-datarefs
         self.socket_strdref = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
@@ -748,7 +751,7 @@ class XPlane(Simulator, SimulatorDataListener, SimulatorDataConsumer, XPlaneBeac
         logger.debug(f"creating xplane instruction {name}")
         return XPlaneInstruction.new(name=name, simulator=self, **kwargs)
 
-    def simulator_data_factory(self, name: str, data_type: str = "float", physical_unit: str = "") -> SimulatorData:
+    def simulator_variable_factory(self, name: str, data_type: str = "float", physical_unit: str = "") -> SimulatorVariable:
         logger.debug(f"creating xplane data {name}")
         return self.get_data(path=name, is_string=data_type in ["string", "str", str])
 
@@ -783,55 +786,55 @@ class XPlane(Simulator, SimulatorDataListener, SimulatorDataConsumer, XPlaneBeac
 
     #
     # Datarefs
-    def get_simulator_data(self) -> set:
+    def get_simulator_variable(self) -> set:
         """Returns the list of datarefs for which the xplane simulator wants to be notified."""
         ret = set(PERMANENT_SIMULATOR_DATA)
         return ret
 
-    def simulator_data_changed(self, data: SimulatorData):
+    def simulator_variable_changed(self, data: SimulatorVariable):
         pass
 
     def add_always_monitored_datarefs(self):
         self.add_cockpit_datarefs()
-        self.add_simulator_datarefs()
+        self.add_simulator_variablerefs()
 
     def add_cockpit_datarefs(self):
         """Cockpit datarefs are always requested and used internaly by the Cockpit"""
         dtdrefs = {}
-        for d in self.cockpit.get_simulator_data():
+        for d in self.cockpit.get_simulator_variable():
             if d.startswith(CONFIG_KW.STRING_PREFIX.value):
                 d = d.replace(CONFIG_KW.STRING_PREFIX.value, "")
                 dtdrefs[d] = self.get_data(d, is_string=True)
             else:
                 dtdrefs[d] = self.get_data(d)
             dtdrefs[d].add_listener(self.cockpit)
-        self.add_simulator_data_to_monitor(dtdrefs)
+        self.add_simulator_variable_to_monitor(dtdrefs)
         logger.info(f"monitoring {len(dtdrefs)} cockpit datarefs")
 
-    def add_simulator_datarefs(self):
+    def add_simulator_variablerefs(self):
         """Simulator datarefs are always requested and used internaly by the Simulator"""
         dtdrefs = {}
-        for d in self.get_simulator_data():
+        for d in self.get_simulator_variable():
             if d.startswith(CONFIG_KW.STRING_PREFIX.value):
                 d = d.replace(CONFIG_KW.STRING_PREFIX.value, "")
                 dtdrefs[d] = self.get_data(d, is_string=True)
             else:
                 dtdrefs[d] = self.get_data(d)
             dtdrefs[d].add_listener(self)
-        self.add_simulator_data_to_monitor(dtdrefs)
+        self.add_simulator_variable_to_monitor(dtdrefs)
         logger.info(f"monitoring {len(dtdrefs)} simulator datarefs")
 
-    def get_data(self, name: str, is_string: bool = False) -> InternalData | Dataref:
+    def get_data(self, name: str, is_string: bool = False) -> InternalVariable | Dataref:
         """Returns data or create a new one, internal if path requires it"""
-        if name in self.all_simulator_data.keys():
-            return self.all_simulator_data[name]
-        if SimulatorData.is_internal_data(path=name):
-            return self.register(simulator_data=InternalData(name=name, is_string=is_string))
-        return self.register(simulator_data=Dataref(path=name, is_string=is_string))
+        if name in self.all_simulator_variable.keys():
+            return self.all_simulator_variable[name]
+        if SimulatorVariable.is_internal_variable(path=name):
+            return self.register(simulator_variable=InternalVariable(name=name, is_string=is_string))
+        return self.register(simulator_variable=Dataref(path=name, is_string=is_string))
 
     def datetime(self, zulu: bool = False, system: bool = False) -> datetime:
         """Returns the simulator date and time"""
-        if DATETIME_DATAREFS[0] not in self.all_simulator_data.keys():  # hack, means dref not created yet
+        if DATETIME_DATAREFS[0] not in self.all_simulator_variable.keys():  # hack, means dref not created yet
             return super().datetime(zulu=zulu, system=system)
         now = datetime.now().astimezone()
         days = self.get_simulation_data_value("sim/time/local_date_days")
@@ -868,7 +871,7 @@ class XPlane(Simulator, SimulatorDataListener, SimulatorDataConsumer, XPlaneBeac
         DREF0+(4byte byte value of 1)+ sim/cockpit/switches/anti_ice_surf_heat_left+0+spaces to complete to 509 bytes
         """
         path = dataref
-        if Dataref.is_internal_data(path):
+        if Dataref.is_internal_variable(path):
             d = self.get_data(path)
             d.update_value(new_value=value, cascade=True)
             logger.debug(f"written local dataref ({path}={value})")
@@ -902,12 +905,18 @@ class XPlane(Simulator, SimulatorDataListener, SimulatorDataConsumer, XPlaneBeac
         Configure XPlane to send the dataref with a certain frequency.
         You can disable a dataref by setting freq to 0.
         """
-        if Dataref.is_internal_data(path):
+        if Dataref.is_internal_variable(path):
             logger.debug(f"{path} is local and does not need X-Plane monitoring")
             return False
 
         if not self.connected:
-            logger.warning(f"no connection ({path}, {freq})")
+            if not self._already_warned > self.MAX_WARNING:
+                if self._already_warned == self.MAX_WARNING:
+                    logger.warning(f"no connection ({path}, {freq}), last warning", exc_info=True)
+                else:
+                    logger.warning(f"no connection ({path}, {freq})", exc_info=True)
+                self._already_warned = self._already_warned + 1
+            # logger.warning(f"no connection ({path}, {freq})", exc_info=True)
             return False
 
         idx = -9999
@@ -953,7 +962,7 @@ class XPlane(Simulator, SimulatorDataListener, SimulatorDataConsumer, XPlaneBeac
         total_values = 0
         last_read_ts = datetime.now()
         total_read_time = 0.0
-        self.set_internal_data(name=INTDREF_CONNECTION_STATUS, value=3, cascade=True)
+        self.set_internal_variable(name=INTERNAL_DATAREF.INTDREF_CONNECTION_STATUS.value, value=3, cascade=True)
         while self.udp_event is not None and not self.udp_event.is_set():
             if len(self.datarefs) > 0:
                 try:
@@ -961,14 +970,14 @@ class XPlane(Simulator, SimulatorDataListener, SimulatorDataConsumer, XPlaneBeac
                     self.socket.settimeout(SOCKET_TIMEOUT)
                     data, addr = self.socket.recvfrom(1472)  # maximum bytes of an RREF answer X-Plane will send (Ethernet MTU - IP hdr - UDP hdr)
                     # Decode Packet
-                    self.set_internal_data(name=INTDREF_CONNECTION_STATUS, value=4, cascade=True)
+                    self.set_internal_variable(name=INTERNAL_DATAREF.INTDREF_CONNECTION_STATUS.value, value=4, cascade=True)
                     self.inc(INTERNAL_DATAREF.UDP_READS.value)
                     # Read the Header "RREF,".
                     number_of_timeouts = 0
                     total_reads = total_reads + 1
                     now = datetime.now()
                     delta = now - last_read_ts
-                    self.set_internal_data(
+                    self.set_internal_variable(
                         name=INTERNAL_DATAREF.LAST_READ.value,
                         value=delta.microseconds,
                         cascade=True,
@@ -996,14 +1005,14 @@ class XPlane(Simulator, SimulatorDataListener, SimulatorDataConsumer, XPlaneBeac
                                     now = datetime.now().astimezone(tz=timezone.utc)
                                     seconds_since_midnight = (now - now.replace(hour=0, minute=0, second=0, microsecond=0)).total_seconds()
                                     diff = value - seconds_since_midnight
-                                    self.set_internal_data(
+                                    self.set_internal_variable(
                                         name=INTERNAL_DATAREF.ZULU_DIFFERENCE.value,
                                         value=diff,
                                         cascade=(total_reads % 2 == 0),
                                     )
 
                                 v = value
-                                r = self.get_rounding(simulator_data_name=d)
+                                r = self.get_rounding(simulator_variable_name=d)
                                 if r is not None and value is not None:
                                     v = round(value, r)
                                 if d not in self._dref_cache or (d in self._dref_cache and self._dref_cache[d] != v):
@@ -1011,7 +1020,7 @@ class XPlane(Simulator, SimulatorDataListener, SimulatorDataConsumer, XPlaneBeac
                                         sim=self,
                                         dataref=d,
                                         value=value,
-                                        cascade=d in self.simulator_data_to_monitor.keys(),
+                                        cascade=d in self.simulator_variable_to_monitor.keys(),
                                     )
                                     self.inc(INTERNAL_DATAREF.UPDATE_ENQUEUED.value)
                                     self._dref_cache[d] = v
@@ -1026,18 +1035,18 @@ class XPlane(Simulator, SimulatorDataListener, SimulatorDataConsumer, XPlaneBeac
                 except TimeoutError:  # socket timeout
                     number_of_timeouts = number_of_timeouts + 1
                     logger.info(f"socket timeout received ({number_of_timeouts}/{MAX_TIMEOUT_COUNT})")  # , exc_info=True
-                    self.set_internal_data(name=INTDREF_CONNECTION_STATUS, value=2, cascade=True)
+                    self.set_internal_variable(name=INTERNAL_DATAREF.INTDREF_CONNECTION_STATUS.value, value=2, cascade=True)
                     if number_of_timeouts >= MAX_TIMEOUT_COUNT:  # attemps to reconnect
                         logger.warning("too many times out, disconnecting, udp_enqueue terminated")  # ignore
                         self.beacon_data = {}
                         if self.udp_event is not None and not self.udp_event.is_set():
                             self.udp_event.set()
-                        self.set_internal_data(name=INTDREF_CONNECTION_STATUS, value=1, cascade=True)
+                        self.set_internal_variable(name=INTERNAL_DATAREF.INTDREF_CONNECTION_STATUS.value, value=1, cascade=True)
                         self.inc(INTERNAL_DATAREF.STOPS.value)
                 except:
                     logger.error(f"udp_enqueue", exc_info=True)
         self.udp_event = None
-        self.set_internal_data(name=INTDREF_CONNECTION_STATUS, value=2, cascade=True)
+        self.set_internal_variable(name=INTERNAL_DATAREF.INTDREF_CONNECTION_STATUS.value, value=2, cascade=True)
         logger.info("..dataref listener terminated")
 
     def strdref_enqueue(self):
@@ -1056,7 +1065,7 @@ class XPlane(Simulator, SimulatorDataListener, SimulatorDataConsumer, XPlaneBeac
             try:
                 self.socket_strdref.settimeout(self.dref_timeout)
                 data, addr = self.socket_strdref.recvfrom(1472)
-                self.set_internal_data(name=INTDREF_CONNECTION_STATUS, value=4, cascade=True)
+                self.set_internal_variable(name=INTERNAL_DATAREF.INTDREF_CONNECTION_STATUS.value, value=4, cascade=True)
                 total_to = 0
                 total_reads = total_reads + 1
                 now = datetime.now()
@@ -1106,7 +1115,7 @@ class XPlane(Simulator, SimulatorDataListener, SimulatorDataConsumer, XPlaneBeac
             except TimeoutError:  # socket timeout
                 total_to = total_to + 1
                 logger.debug(f"string dataref listener: socket timeout ({self.dref_timeout} secs.) received ({total_to})")
-                self.set_internal_data(name=INTDREF_CONNECTION_STATUS, value=2, cascade=True)
+                self.set_internal_variable(name=INTERNAL_DATAREF.INTDREF_CONNECTION_STATUS.value, value=2, cascade=True)
                 self.dref_timeout = self.dref_timeout + 1  # may be we are too fast to ask, let's slow down a bit next time...
             except:
                 logger.warning(f"strdref_enqueue", exc_info=True)
@@ -1116,7 +1125,7 @@ class XPlane(Simulator, SimulatorDataListener, SimulatorDataConsumer, XPlaneBeac
         # self.socket_strdref.shutdown()
         # self.socket_strdref.close()
         # logger.info("..strdref socket closed..")
-        self.set_internal_data(name=INTDREF_CONNECTION_STATUS, value=3, cascade=True)
+        self.set_internal_variable(name=INTERNAL_DATAREF.INTDREF_CONNECTION_STATUS.value, value=3, cascade=True)
         logger.info("..string dataref listener terminated")
 
     # ################################
@@ -1138,26 +1147,24 @@ class XPlane(Simulator, SimulatorDataListener, SimulatorDataConsumer, XPlaneBeac
             logger.warning(f"no command")
 
     def remove_local_datarefs(self, datarefs) -> list:
-        return list(filter(lambda d: not Dataref.is_internal_data(d), datarefs))
+        return list(filter(lambda d: not Dataref.is_internal_variable(d), datarefs))
 
     def clean_datarefs_to_monitor(self):
         if not self.connected:
-            logger.warning("no connection")
             return
         for i in range(len(self.datarefs)):
             self.add_dataref_to_monitor(next(iter(self.datarefs.values())), freq=0)
-        super().clean_simulator_data_to_monitor()
+        super().clean_simulator_variable_to_monitor()
         self._strdref_cache = {}
         self._dref_cache = {}
         logger.debug("done")
 
-    def add_simulator_data_to_monitor(self, datarefs):
+    def add_simulator_variable_to_monitor(self, datarefs):
         if not self.connected:
-            logger.warning("no connection")
             logger.debug(f"would add {self.remove_local_datarefs(datarefs.keys())}")
             return
         # Add those to monitor
-        super().add_simulator_data_to_monitor(datarefs)
+        super().add_simulator_variable_to_monitor(datarefs)
         prnt = []
         for d in datarefs.values():
             if d.is_internal:
@@ -1169,54 +1176,51 @@ class XPlane(Simulator, SimulatorDataListener, SimulatorDataConsumer, XPlaneBeac
             if self.add_dataref_to_monitor(d.name, freq=d.update_frequency):
                 prnt.append(d.name)
 
-        logger.log(SPAM_LEVEL, f"add_simulator_data_to_monitor: added {prnt}")
+        logger.log(SPAM_LEVEL, f"add_simulator_variable_to_monitor: added {prnt}")
         if MONITOR_DATAREF_USAGE:
             logger.info(f">>>>> monitoring++{len(datarefs)}/{len(self.datarefs)}/{self._max_monitored}")
 
-    def remove_simulator_data_to_monitor(self, datarefs):
-        if not self.connected and len(self.simulator_data_to_monitor) > 0:
-            logger.warning("no connection")
+    def remove_simulator_variable_to_monitor(self, datarefs):
+        if not self.connected and len(self.simulator_variable_to_monitor) > 0:
             logger.debug(f"would remove {datarefs.keys()}/{self._max_monitored}")
             return
         # Add those to monitor
         prnt = []
         for d in datarefs.values():
             if d.is_internal:
-                logger.debug(f"local dataref {d.name} is not monitored")
+                logger.debug(f"internal variable {d.name} is not monitored")
                 continue
-            if d.name in self.simulator_data_to_monitor.keys():
-                if self.simulator_data_to_monitor[d.name] == 1:  # will be decreased by 1 in super().remove_simulator_data_to_monitor()
+            if d.name in self.simulator_variable_to_monitor.keys():
+                if self.simulator_variable_to_monitor[d.name] == 1:  # will be decreased by 1 in super().remove_simulator_variable_to_monitor()
                     if self.add_dataref_to_monitor(d.name, freq=0):
                         prnt.append(d.name)
                 else:
-                    logger.debug(f"{d.name} monitored {self.simulator_data_to_monitor[d.name]} times")
+                    logger.debug(f"{d.name} monitored {self.simulator_variable_to_monitor[d.name]} times")
             else:
                 logger.debug(f"no need to remove {d.name}")
 
         logger.debug(f"removed {prnt}")
-        super().remove_simulator_data_to_monitor(datarefs)
+        super().remove_simulator_variable_to_monitor(datarefs)
         if MONITOR_DATAREF_USAGE:
             logger.info(f">>>>> monitoring--{len(datarefs)}/{len(self.datarefs)}/{self._max_monitored}")
 
     def remove_all_datarefs(self):
-        if not self.connected and len(self.all_simulator_data) > 0:
-            logger.warning("no connection")
-            logger.debug(f"would remove {self.all_simulator_data.keys()}")
+        if not self.connected and len(self.all_simulator_variable) > 0:
+            logger.debug(f"would remove {self.all_simulator_variable.keys()}")
             return
         # Not necessary:
-        # self.remove_simulator_data_to_monitor(self.all_simulator_data)
-        super().remove_all_simulator_data()
+        # self.remove_simulator_variable_to_monitor(self.all_simulator_variable)
+        super().remove_all_simulator_variable()
 
     def add_all_datarefs_to_monitor(self):
         if not self.connected:
-            logger.warning("no connection")
             return
         # Add always monitored drefs
         self.add_always_monitored_datarefs()
         # Add those to monitor
         prnt = []
-        for path in self.simulator_data_to_monitor.keys():
-            d = self.all_simulator_data.get(path)
+        for path in self.simulator_variable_to_monitor.keys():
+            d = self.all_simulator_variable.get(path)
             if d is not None:
                 if not d.is_string:
                     if self.add_dataref_to_monitor(d.name, freq=d.update_frequency):

@@ -47,10 +47,6 @@ class XPRealWeatherIcon(XPWeatherBaseIcon):
 
         XPWeatherBaseIcon.__init__(self, button=button)
 
-        # Working variables
-        self.collector = self.button.sim.collector  # shortcut
-        self.all_collections = ["weather"] + [f"cloud#{i}" for i in range(3)] + [f"wind#{i}" for i in range(13)]
-
     def init(self):
         if self._inited:
             return

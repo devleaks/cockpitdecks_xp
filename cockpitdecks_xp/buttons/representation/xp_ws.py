@@ -63,7 +63,7 @@ class XPWeatherSummaryIcon(XPWeatherBaseIcon):
         self._inited = True
         logger.debug(f"inited")
 
-    def get_simulator_data(self) -> set:
+    def get_simulator_variable(self) -> set:
         return self.weather_datarefs
 
     def is_updated(self, force: bool = False) -> bool:

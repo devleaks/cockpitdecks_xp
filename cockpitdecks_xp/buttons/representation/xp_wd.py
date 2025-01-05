@@ -12,6 +12,7 @@ import io
 import re
 import logging
 import json
+import math
 from enum import Enum
 from typing import List
 from datetime import datetime, timezone
@@ -22,13 +23,49 @@ import requests
 from metar import Metar
 from avwx import Station
 
-logger = logging.getLogger(__name__)
-# logger.setLevel(SPAM_LEVEL)
-# logger.setLevel(logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("mkmetar")
+logger.setLevel(logging.DEBUG)
 
 # «HARDCODED» values for testing locally
 # XP_API_URL = "http://192.168.1.141:8080/api/v1"
 WEATHER_CACHE_FILE = "weather.json"
+API_URL = "http://192.168.1.140:8080/api/v1/datarefs"
+
+
+def distance(origin, destination):
+    """
+    Calculate the Haversine distance.
+
+    Parameters
+    ----------
+    origin : tuple of float
+        (lat, long)
+    destination : tuple of float
+        (lat, long)
+
+    Returns
+    -------
+    distance_in_km : float
+
+    Examples
+    --------
+    >>> origin = (48.1372, 11.5756)  # Munich
+    >>> destination = (52.5186, 13.4083)  # Berlin
+    >>> round(distance(origin, destination), 1)
+    504.2
+    """
+    lat1, lon1 = origin
+    lat2, lon2 = destination
+    radius = 6371  # km
+
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = math.sin(dlat / 2) * math.sin(dlat / 2) + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) * math.sin(dlon / 2)
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    d = radius * c
+
+    return d
 
 
 class WEATHER_LOCATION(Enum):
@@ -94,6 +131,7 @@ DATAREF_AIRCRAFT_WIND = {
 DATAREF_REGION_WEATHER = {
     "change_mode": "sim/weather/region/change_mode",  # How the weather is changing. 0 = Rapidly Improving, 1 = Improving, 2 = Gradually Improving, 3 = Static, 4 = Gradually Deteriorating, 5 = Deteriorating, 6 = Rapidly Deteriorating, 7 = Using Real Weather
     "qnh_base": "sim/weather/region/qnh_base_elevation",
+    "qnh_pas": "sim/weather/region/qnh_pas",
     "rain_pct": "sim/weather/region/rain_percent",
     "runway_friction": "sim/weather/region/runway_friction",  # The friction constant for runways (how wet they are). Dry = 0, wet(1-3), puddly(4-6), snowy(7-9), icy(10-12), snowy/icy(13-15)
     "pressure_msl": "sim/weather/region/sealevel_pressure_pas",
@@ -111,14 +149,14 @@ DATAREF_REGION_WEATHER = {
 
 DATAREF_REGION_CLOUD = {
     "base": "sim/weather/region/cloud_base_msl_m",
-    "coverage_pct": "sim/weather/region/cloud_coverage_percent",
+    "coverage": "sim/weather/region/cloud_coverage_percent",
     "tops": "sim/weather/region/cloud_tops_msl_m",
     "cloud_type": "sim/weather/region/cloud_type",
 }
 
 DATAREF_REGION_WIND = {
     "alt_msl": "sim/weather/region/atmosphere_alt_levels_m",
-    "dewpoint": "sim/weather/region/dewpoint_deg_c",
+    "dew_point": "sim/weather/region/dewpoint_deg_c",
     "temp_aloft": "sim/weather/region/temperatures_aloft_deg_c",
     "temp_alt_msl": "sim/weather/region/temperature_altitude_msl_m",
     "wind_alt_msl": "sim/weather/region/wind_altitude_msl_m",
@@ -131,9 +169,9 @@ DATAREF_REGION_WIND = {
 #
 # ######################################################################################
 
-
-AIRCRAFT_DATAREFS = DATAREF_TIME | DATAREF_AIRCRAFT_WEATHER | DATAREF_AIRCRAFT_CLOUD | DATAREF_AIRCRAFT_WIND
-REGION_DATAREFS = DATAREF_TIME | DATAREF_REGION_WEATHER | DATAREF_REGION_CLOUD | DATAREF_REGION_WIND
+# Flavor
+AIRCRAFT_DATAREFS = DATAREF_TIME | DATAREF_LOCATION | DATAREF_AIRCRAFT_WEATHER | DATAREF_AIRCRAFT_CLOUD | DATAREF_AIRCRAFT_WIND
+REGION_DATAREFS = DATAREF_TIME | DATAREF_LOCATION | DATAREF_REGION_WEATHER | DATAREF_REGION_CLOUD | DATAREF_REGION_WIND
 
 
 class DatarefAccessor:
@@ -185,17 +223,29 @@ class XPWeatherData:
     CLOUD_LAYERS = 3
     WIND_LAYERS = 13
 
-    def __init__(self, weather_type: str = WEATHER_LOCATION.AIRCRAFT.value, update: bool = False):
+    def __init__(self, weather_type: str = WEATHER_LOCATION.REGION.value, update: bool = False):
         self.station = None
-
         self.weather_type = weather_type
+        self.weather: Weather | None = None
+        self.wind_layers: List[WindLayer] = []  #  Defined wind layers. Not all layers are always defined. up to 13 layers(!)
+        self.cloud_layers: List[CloudLayer] = []  #  Defined cloud layers. Not all layers are always defined. up to 3 layers
 
-        DATAREF_WEATHER = DATAREF_AIRCRAFT_WEATHER if self.weather_type == WEATHER_LOCATION.AIRCRAFT.value else DATAREF_REGION_WEATHER
+        self.update_weather(update=update)
+
+    def update(self):
+        if self.further_than(kilometers=50):
+            self.update_weather()
+        elif self.older_than(seconds=30 * 60):
+            self.update_weather()
+        else:
+            logger.info("no update necessary")
+
+    def update_weather(self, update: bool = True):
+        DATAREF_WEATHER = AIRCRAFT_DATAREFS if self.weather_type == WEATHER_LOCATION.AIRCRAFT.value else REGION_DATAREFS
         DATAREF_CLOUD = DATAREF_AIRCRAFT_CLOUD if self.weather_type == WEATHER_LOCATION.AIRCRAFT.value else DATAREF_REGION_CLOUD
         DATAREF_WIND = DATAREF_AIRCRAFT_WIND if self.weather_type == WEATHER_LOCATION.AIRCRAFT.value else DATAREF_REGION_WIND
 
-        drefs = self.collect_weather_datarefs(weather_type, update)
-
+        drefs = self.collect_weather_datarefs(update=update)
         self.weather = Weather(DATAREF_WEATHER, drefs)
         self.wind_layers: List[WindLayer] = []  #  Defined wind layers. Not all layers are always defined. up to 13 layers(!)
         self.cloud_layers: List[CloudLayer] = []  #  Defined cloud layers. Not all layers are always defined. up to 3 layers
@@ -206,22 +256,23 @@ class XPWeatherData:
         for i in range(self.WIND_LAYERS):
             self.wind_layers.append(WindLayer(DATAREF_WIND, drefs, i))
 
-        self.init()
-
-    def collect_weather_datarefs(self, weather_type: str = WEATHER_LOCATION.AIRCRAFT.value, update: bool = False) -> dict:
-        if not update and os.path.exists(WEATHER_CACHE_FILE):
-            data = {}
-            with open(WEATHER_CACHE_FILE) as fp:
-                data = json.load(fp)
-                logger.info("weather file loaded")
-                self.last_updated = os.path.getmtime(WEATHER_CACHE_FILE)
-            return data
+    def collect_weather_datarefs(self, update: bool = True, position_only: bool = False) -> dict:
+        if not update:
+            if os.path.exists(WEATHER_CACHE_FILE):
+                data = {}
+                with open(WEATHER_CACHE_FILE) as fp:
+                    data = json.load(fp)
+                    logger.info("weather file loaded")
+                    self.last_updated = os.path.getmtime(WEATHER_CACHE_FILE)
+                return data
+            else:
+                logger.warning("weather file not found")
 
         DATA = "data"
         IDENT = "id"
 
         def get_dataref_specs(path: str) -> dict | None:
-            api_url = f"{self.button.sim.api_url}/datarefs"
+            api_url = API_URL
             payload = {"filter[name]": path}
             response = requests.get(api_url, params=payload)
             resp = response.json()
@@ -242,7 +293,7 @@ class XPWeatherData:
             if dref is None or IDENT not in dref:
                 logger.error(f"error for {path}")
                 return None
-            url = f"{self.button.sim.api_url}/datarefs/{dref[IDENT]}/value"
+            url = f"{API_URL}/{dref[IDENT]}/value"
             response = requests.get(url)
             data = response.json()
             if DATA in data:
@@ -251,12 +302,15 @@ class XPWeatherData:
             return None
 
         WEATHER_DATAFEFS = AIRCRAFT_DATAREFS if self.weather_type == WEATHER_LOCATION.AIRCRAFT.value else REGION_DATAREFS
+        if position_only:
+            WEATHER_DATAFEFS = DATAREF_LOCATION
 
         logger.info("weather: collecting weather datarefs..")
         weather_datarefs = {}
         for d in WEATHER_DATAFEFS.values():
-            logger.debug(d)
-            weather_datarefs[d] = get_dataref_value(d)
+            v = get_dataref_value(d)
+            weather_datarefs[d] = v
+            logger.debug(f"{d}={v}")
         logger.info(f"..collected {len(weather_datarefs)} datarefs")
 
         # flatten arrays
@@ -266,25 +320,38 @@ class XPWeatherData:
 
         if os.path.exists(WEATHER_CACHE_FILE):
             logger.warning("weather file already exists, overwritten")
-            with open(WEATHER_CACHE_FILE, "w") as fp:
-                json.dump(weather_datarefs, fp)
-                logger.info("weather file written")
+        with open(WEATHER_CACHE_FILE, "w") as fp:
+            json.dump(weather_datarefs, fp)
+            logger.info("weather file written")
 
         self.last_updated = datetime.now().timestamp()
         return weather_datarefs
 
-    def init(self):
-        self.print(level=logging.DEBUG)  # writes to logger.debug
-
     def older_than(self, seconds):
         if self.last_updated is None:
+            logger.info("no data")
             return True
         now = datetime.now().timestamp()
+        logger.info(f"older: {round(now - self.last_updated, 2)} vs {seconds}secs.")
         return now - self.last_updated > seconds
+
+    def further_than(self, kilometers):
+        if self.station is None:
+            logger.info("no station")
+            return True
+        position = self.collect_weather_datarefs(position_only=True)
+        here = (position["sim/flightmodel/position/latitude"], position["sim/flightmodel/position/longitude"])
+        station = (self.station.latitude, self.station.longitude)
+        dist = distance(station, here)
+        logger.info(f"further: {round(dist, 1)} vs {kilometers}km")
+        return dist > kilometers
 
     def guess_location(self):
         logger.info("location not guessed")
 
+    # ################################################
+    #
+    #
     def sort_layers_by_alt(self):
         # only keeps layers with altitude
         cloud_alts = filter(lambda x: x.base is not None, self.cloud_layers)
@@ -313,70 +380,6 @@ class XPWeatherData:
                 return l
         return None
 
-    def make_metar(self, alt=None):
-        metar = self.getStation()
-        metar = metar + " " + self.getTime()
-        metar = metar + " " + self.getAuto()
-        metar = metar + " " + self.getWind()
-        if self.is_cavok():
-            metar = metar + " CAVOK"
-            metar = metar + " " + self.getRVR()
-        else:
-            metar = metar + " " + self.getVisibility()
-            metar = metar + " " + self.getRVR()
-            metar = metar + " " + self.getPhenomenae()
-            metar = metar + " " + self.getClouds()
-        metar = metar + " " + self.getTemperatures()
-        metar = metar + " " + self.getPressure()
-        metar = metar + " " + self.getForecast()
-        metar = metar + " " + self.getRemarks()
-        return re.sub(" +", " ", metar)  # clean multiple spaces
-
-    def print(self, level=logging.INFO):
-        width = 70
-        output = io.StringIO()
-        print("\n", file=output)
-        print("=" * width, file=output)
-        MARK_LIST = ["DATAREF", "VALUE"]
-        table = []
-        csv = []
-
-        DATAREF_WEATHER = DATAREF_AIRCRAFT_WEATHER if self.weather_type == WEATHER_LOCATION.AIRCRAFT.value else DATAREF_REGION_WEATHER
-        DATAREF_CLOUD = DATAREF_AIRCRAFT_CLOUD if self.weather_type == WEATHER_LOCATION.AIRCRAFT.value else DATAREF_REGION_CLOUD
-        DATAREF_WIND = DATAREF_AIRCRAFT_WIND if self.weather_type == WEATHER_LOCATION.AIRCRAFT.value else DATAREF_REGION_WIND
-
-        for k, v in DATAREF_WEATHER.items():
-            line = (v, getattr(self.weather, k))
-            table.append(line)  # print(v, getattr(self.weather, k))
-            csv.append(line)
-        i = 0
-        for l in self.cloud_layers:
-            for k, v in DATAREF_CLOUD.items():
-                line = (f"{v}[{i}]", getattr(l, k))  # print(f"{v}[{i}]", getattr(l, k))
-                table.append(line)
-                csv.append(line)
-            i = i + 1
-        i = 0
-        for l in self.wind_layers:
-            for k, v in DATAREF_WIND.items():
-                line = (f"{v}[{i}]", getattr(l, k))  # print(f"{v}[{i}]", getattr(l, k))
-                table.append(line)
-                csv.append(line)
-            i = i + 1
-        # table = sorted(table, key=lambda x: x[0])  # absolute emission time
-        print(tabulate(table, headers=MARK_LIST), file=output)
-        print("-" * width, file=output)
-        print(f"reconstructed METAR: {self.make_metar()}", file=output)
-        print("=" * width, file=output)
-
-        # with open(WEATHER_CACHE_FILE, "w") as fp:
-        #     for l in csv:
-        #         print(l[0], l[1], file=fp)
-
-        contents = output.getvalue()
-        output.close()
-        logger.log(level, f"{contents}")
-
     def print_cloud_layers_alt(self):
         i = 0
         for l in self.cloud_layers:
@@ -390,7 +393,15 @@ class XPWeatherData:
             i = i + 1
 
     def getStation(self):
-        return "ICAO" if self.station is None else self.station.icao
+        lat = self.weather.latitude
+        lon = self.weather.longitude
+        return Station.nearest(lat=lat, lon=lon, max_coord_distance=150000)
+
+    def getStationICAO(self, remember: bool = False):
+        (nearest, coords) = self.getStation()
+        if nearest is not None and remember:
+            self.setStation(nearest)
+        return "ICAO" if nearest is None else nearest.icao
 
     def setStation(self, station: Station):
         self.station = station
@@ -412,12 +423,18 @@ class XPWeatherData:
             if len(hasalt) > 0:
                 lb = sorted(hasalt, key=lambda x: x.alt_msl, reverse=True)
                 lowest = lb[0]
-                speed = round(lowest.speed_kts)
-                direct = lowest.direction
+                speed = 0
+                direct = None
+                if self.weather_type == WEATHER_LOCATION.AIRCRAFT.value:
+                    speed = round(lowest.speed_kts)
+                    direct = lowest.direction
+                else:
+                    speed = round(lowest.wind_speed * 1.943844)
+                    direct = lowest.wind_dir
                 if direct is None:
                     ret = f"{speed:02d}VRBKT"
                 else:
-                    direct = round(lowest.direction)
+                    direct = round(direct)
                     ret = f"{direct:03d}{speed:02d}KT"
                 # @todo add gusting later
             else:
@@ -437,7 +454,7 @@ class XPWeatherData:
         i = 0
         while nocov and i < len(self.cloud_layers):
             cl = self.cloud_layers[i]
-            nocov = cl.coverage is None or cl.coverage < 0.125  # 1/8
+            nocov = cl.coverage is None or cl.coverage < 0.125  # 1/8, some say < 0.05
             i = i + 1
         return dist > 9999 and nocov
 
@@ -500,12 +517,13 @@ class XPWeatherData:
         phenomenon = ""
         self.sort_layers_by_alt()
         vis = 9999
-        if self.weather.visibility is not None:
-            vis = round(self.weather.precipitations)  ## m
-        water = 0
-        if self.weather.visibility is not None:
-            water = round(self.weather.precipitations)  ## m
-        lc = self.cloud_layers[0]
+        if self.weather_type == WEATHER_LOCATION.AIRCRAFT.value:
+            if self.weather.visibility is not None:
+                vis = round(self.weather.precipitations)  ## m
+            water = 0
+            if self.weather.visibility is not None:
+                water = round(self.weather.precipitations)  ## m
+            lc = self.cloud_layers[0]
 
         # Mist or fog
         # Water saturation 100%, temp <= dew point temp
@@ -546,29 +564,50 @@ class XPWeatherData:
                     s = "OVC"
                 if s != "":
                     alt = to_fl(l.base, 5)
-                    local = f"{s}{alt}"
+                    local = f"{s}{alt:03d}"
                 last = cov
             clouds = clouds + " " + local
         return clouds.strip()
 
-    def getTemperatures(self):
-        t1 = round(self.weather.temp)
-        temp = ""
-        if t1 < 0:
-            temp = f"M{abs(t1)}/"
+    def getTemperatures(self) -> str:
+        def negtemp(temp):
+            # format negative temperature (celsius)
+            # no temperature is //
+            if temp is None or (type(temp) is str and temp == "//"):
+                return "//"
+            return f"M{abs(temp):02d}" if temp < 0 else f"{t1:02d}"
+
+        # Temperature
+        t1 = None
+        if self.weather_type == WEATHER_LOCATION.AIRCRAFT.value:
+            if hasattr(self.weather, "temp") and self.weather.temp is not None:
+                t1 = round(self.weather.temp)
+            else:
+                t1 = "//"
         else:
-            temp = f"{t1}"
+            if hasattr(self.weather, "temperature_msl") and self.weather.temperature_msl is not None:
+                t1 = round(self.weather.temperature_msl)
+            else:
+                t1 = "//"
+        temp = negtemp(t1)
+        # Dew point of lowest wind layer
         self.sort_layers_by_alt()
         l = self.wind_layers[0]
-        t1 = round(l.dew_point)
-        if t1 < 0:
-            temp = temp + "/" + f"M{abs(t1)}/"
+        t1 = None
+        if hasattr(l, "dew_point") and l.dew_point is not None:
+            t1 = round(l.dew_point)
         else:
-            temp = temp + "/" + f"{t1}"
+            t1 = "//"
+        # Can return "/////" if no temp
+        temp = temp + "/" + negtemp(t1)
         return temp
 
     def getPressure(self):
-        press = f"{round(self.weather.qnh/100)}"
+        press = None
+        if self.weather_type == WEATHER_LOCATION.AIRCRAFT.value:
+            press = f"{round(self.weather.qnh/100)}"
+        else:
+            press = f"{round(self.weather.qnh_pas/100)}"
         return press
 
     def getForecast(self):
@@ -576,6 +615,73 @@ class XPWeatherData:
 
     def getRemarks(self):
         return ""
+
+    # ################################################
+    #
+    #
+    def print(self, level=logging.INFO):
+        width = 70
+        output = io.StringIO()
+        print("\n", file=output)
+        print("=" * width, file=output)
+        MARK_LIST = ["DATAREF", "VALUE"]
+        table = []
+        csv = []
+
+        DATAREF_WEATHER = DATAREF_AIRCRAFT_WEATHER if self.weather_type == WEATHER_LOCATION.AIRCRAFT.value else DATAREF_REGION_WEATHER
+        DATAREF_CLOUD = DATAREF_AIRCRAFT_CLOUD if self.weather_type == WEATHER_LOCATION.AIRCRAFT.value else DATAREF_REGION_CLOUD
+        DATAREF_WIND = DATAREF_AIRCRAFT_WIND if self.weather_type == WEATHER_LOCATION.AIRCRAFT.value else DATAREF_REGION_WIND
+
+        for k, v in DATAREF_WEATHER.items():
+            line = (v, getattr(self.weather, k))
+            table.append(line)  # print(v, getattr(self.weather, k))
+            csv.append(line)
+        i = 0
+        for l in self.cloud_layers:
+            for k, v in DATAREF_CLOUD.items():
+                line = (f"{v}[{i}]", getattr(l, k))  # print(f"{v}[{i}]", getattr(l, k))
+                table.append(line)
+                csv.append(line)
+            i = i + 1
+        i = 0
+        for l in self.wind_layers:
+            for k, v in DATAREF_WIND.items():
+                line = (f"{v}[{i}]", getattr(l, k))  # print(f"{v}[{i}]", getattr(l, k))
+                table.append(line)
+                csv.append(line)
+            i = i + 1
+        # table = sorted(table, key=lambda x: x[0])  # absolute emission time
+        print(tabulate(table, headers=MARK_LIST), file=output)
+        print("-" * width, file=output)
+        print(f"reconstructed METAR: {self.make_metar()}", file=output)
+        print("=" * width, file=output)
+
+        # with open(WEATHER_CACHE_FILE, "w") as fp:
+        #     for l in csv:
+        #         print(l[0], l[1], file=fp)
+
+        contents = output.getvalue()
+        output.close()
+        logger.log(level, f"{contents}")
+
+    def make_metar(self, alt=None):
+        metar = self.getStationICAO(remember=self.station is None)
+        metar = metar + " " + self.getTime()
+        metar = metar + " " + self.getAuto()
+        metar = metar + " " + self.getWind()
+        if self.is_cavok():
+            metar = metar + " CAVOK"
+            metar = metar + " " + self.getRVR()
+        else:
+            metar = metar + " " + self.getVisibility()
+            metar = metar + " " + self.getRVR()
+            metar = metar + " " + self.getPhenomenae()
+            metar = metar + " " + self.getClouds()
+        metar = metar + " " + self.getTemperatures()
+        metar = metar + " " + self.getPressure()
+        metar = metar + " " + self.getForecast()
+        metar = metar + " " + self.getRemarks()
+        return re.sub(" +", " ", metar)  # clean multiple spaces
 
     def get_metar_desc(self, metar=None):
         if metar is None:
@@ -600,7 +706,8 @@ if __name__ == "__main__":
     # for d, v in drefs.items():
     #     if type(v) is list:  # "dataref": [value, value, ...]
     #         drefs = drefs | {f"{d}[{i}]": v[i] for i in range(len(v))} # "dataref[i]": value(i)
-    w = XPWeatherData(update=True)
+    w = XPWeatherData(weather_type=WEATHER_LOCATION.REGION.value, update=True)
+    w.print(level=logging.DEBUG)  # writes to logger.debug
 
     w.print_cloud_layers_alt()
     print("cl base", w.cloud_layer_at(0).base)
@@ -609,10 +716,15 @@ if __name__ == "__main__":
     print("wl base", w.wind_layer_at(0).alt_msl)
 
     print("sample values")
-    print("baro", w.weather.baro)
-    print("qnh", w.weather.qnh)
+    if w.weather_type == WEATHER_LOCATION.AIRCRAFT.value:
+        print("baro", w.weather.baro)
+        print("qnh", w.weather.qnh)
+    else:
+        print("qnh base", w.weather.qnh_pas)
     print("cloud type", w.cloud_layers[2].cloud_type)
     print("wind layer alt", w.wind_layers[7].alt_msl)
 
     print("generated metar")
     print(w.get_metar_desc())
+
+    w.update()
