@@ -29,7 +29,6 @@ class XPRealWeatherIcon(XPWeatherBaseIcon):
     def __init__(self, button: "Button"):
         self.weather = button._config.get(self.REPRESENTATION_NAME, {})
         self.mode = self.weather.get("mode", WEATHER_LOCATION.AIRCRAFT.value)
-
         self.xpweather = None
 
         self._upd_calls = 0
@@ -45,6 +44,12 @@ class XPRealWeatherIcon(XPWeatherBaseIcon):
 
         XPWeatherBaseIcon.__init__(self, button=button)
 
+    @property
+    def api_url(self):
+        a = self.button.sim.api_url
+        print(">>>>>>>>>", a)
+        return a
+
     def init(self):
         if self._inited:
             return
@@ -55,14 +60,18 @@ class XPRealWeatherIcon(XPWeatherBaseIcon):
     def should_update(self) -> bool:
         UPDATE_TIME_SECS = 300
         if self.xpweather is None:
-            self.xpweather = XPWeatherData(weather_type=self.mode)  # read cache or create new set
-            return self.should_update()
+            return True
         now = datetime.now().timestamp()
         return (now - self.xpweather.last_updated) > UPDATE_TIME_SECS
 
     def update_weather(self):
         if self.should_update():
-            self.xpweather = XPWeatherData(weather_type=self.mode, update=True)
+            api_url = self.api_url
+            if api_url is not None:
+                api_url = api_url + "/datarefs"
+                self.xpweather = XPWeatherData(api_url=api_url, weather_type=self.mode, update=True)
+            else:
+                return False
         if self._cache_metar is not None:
             if self._cache_metar == self.xpweather.make_metar():
                 logger.debug(f"XP weather unchanged")
@@ -91,6 +100,11 @@ class XPRealWeatherIcon(XPWeatherBaseIcon):
             bv = 0
         else:
             bv = int(bv)
+        lines = []
+        if self.xpweather is None:
+            lines.append(f"Mode: {self.mode}")
+            lines.append("No weather")
+            return lines
         return self.xpweather.get_metar_lines(layer_index=bv)
 
     def describe(self) -> str:

@@ -27,11 +27,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("make_metar")
 logger.setLevel(logging.DEBUG)
 
-# «HARDCODED» values for testing locally
-# XP_API_URL = "http://192.168.1.141:8080/api/v1"
-WEATHER_CACHE_FILE = "weather.json"
-API_URL = "http://192.168.1.140:8080/api/v1/datarefs"
-
 
 def distance(origin, destination):
     """
@@ -190,7 +185,7 @@ class DatarefAccessor:
         name = f"{self.attr_db[name]}"
         if self.__drefidx__ is not None:
             name = name + f"[{self.__drefidx__}]"
-        print("getting", name)
+        # print("getting", name)
         # return dref.value() if dref is not None else None # if dict values are datarefs, not values
         return self.__datarefs__.get(name)
 
@@ -225,16 +220,22 @@ class XPWeatherData:
     CLOUD_LAYERS = 3
     WIND_LAYERS = 13
 
-    def __init__(self, weather_type: str = WEATHER_LOCATION.REGION.value, update: bool = False):
+    def __init__(self, api_url: str, weather_type: str = WEATHER_LOCATION.REGION.value, update: bool = False):
         self.station = None
         self.weather_type = weather_type
         self.last_updated: datetime | None = None
+        self.api_url = api_url
         self.generated_metar = None
         self.weather: Weather | None = None
         self.wind_layers: List[WindLayer] = []  #  Defined wind layers. Not all layers are always defined. up to 13 layers(!)
         self.cloud_layers: List[CloudLayer] = []  #  Defined cloud layers. Not all layers are always defined. up to 3 layers
 
         self.update_weather(update=update)
+
+    @property
+    def cache_filename(self) -> str:
+        s = self.station.icao if self.station is not None else "ICAO"
+        return f"weather-{s}-{self.weather_type}.json"
 
     def update(self):
         if self.further_than(kilometers=50):
@@ -262,11 +263,11 @@ class XPWeatherData:
 
     def collect_weather_datarefs(self, update: bool = True, position_only: bool = False) -> dict:
         if not update:
-            if os.path.exists(WEATHER_CACHE_FILE):
+            if os.path.exists(self.cache_filename):
                 data = {}
-                with open(WEATHER_CACHE_FILE) as fp:
+                with open(self.cache_filename) as fp:
                     data = json.load(fp)
-                    self.last_updated = os.path.getmtime(WEATHER_CACHE_FILE)
+                    self.last_updated = os.path.getmtime(self.cache_filename)
                     if "meta" in data and data["meta"].get("mode") == self.weather_type:
                         t = data["meta"].get("mode")
                         logger.info(f"weather file loaded (mode {t})")
@@ -282,7 +283,7 @@ class XPWeatherData:
         IDENT = "id"
 
         def get_dataref_specs(path: str) -> dict | None:
-            api_url = API_URL
+            api_url = self.api_url
             payload = {"filter[name]": path}
             response = requests.get(api_url, params=payload)
             resp = response.json()
@@ -303,7 +304,7 @@ class XPWeatherData:
             if dref is None or IDENT not in dref:
                 logger.error(f"error for {path}")
                 return None
-            url = f"{API_URL}/{dref[IDENT]}/value"
+            url = f"{self.api_url}/{dref[IDENT]}/value"
             response = requests.get(url)
             data = response.json()
             if DATA in data:
@@ -315,7 +316,7 @@ class XPWeatherData:
         if position_only:
             WEATHER_DATAFEFS = DATAREF_LOCATION
 
-        logger.info("weather: collecting weather datarefs..")
+        logger.info(f"collecting {self.weather_type} weather datarefs..")
         weather_datarefs = {}
         for d in WEATHER_DATAFEFS.values():
             v = get_dataref_value(d)
@@ -328,13 +329,13 @@ class XPWeatherData:
             if type(v) is list:  # "dataref": [value, value, ...]
                 weather_datarefs = weather_datarefs | {f"{d}[{i}]": v[i] for i in range(len(v))}  # "dataref[i]": value(i)
 
-        if os.path.exists(WEATHER_CACHE_FILE):
+        if os.path.exists(self.cache_filename):
             logger.warning("weather file already exists, overwritten")
-        with open(WEATHER_CACHE_FILE, "w") as fp:
+        with open(self.cache_filename, "w") as fp:
             weather_datarefs["meta"] = {"mode": self.weather_type, "last-updated": self.last_updated, "generated-metar": self.generated_metar}
             json.dump(weather_datarefs, fp)
             del weather_datarefs["meta"]
-            logger.info(f"weather file {os.path.abspath(WEATHER_CACHE_FILE)} written")
+            logger.info(f"weather file {os.path.abspath(self.cache_filename)} written")
 
         self.last_updated = datetime.now().timestamp()
         return weather_datarefs
@@ -829,7 +830,7 @@ class XPWeatherData:
         print(f"reconstructed METAR: {self.make_metar()}", file=output)
         print("=" * width, file=output)
 
-        # with open(WEATHER_CACHE_FILE, "w") as fp:
+        # with open(self.cache_filename, "w") as fp:
         #     for l in csv:
         #         print(l[0], l[1], file=fp)
 
