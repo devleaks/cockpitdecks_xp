@@ -837,8 +837,8 @@ class XPlane(Simulator, SimulatorVariableListener, SimulatorVariableConsumer, XP
         if DATETIME_DATAREFS[0] not in self.all_simulator_variable.keys():  # hack, means dref not created yet
             return super().datetime(zulu=zulu, system=system)
         now = datetime.now().astimezone()
-        days = self.get_simulation_data_value("sim/time/local_date_days")
-        secs = self.get_simulation_data_value("sim/time/local_date_sec")
+        days = self.get_simulator_variable_value("sim/time/local_date_days")
+        secs = self.get_simulator_variable_value("sim/time/local_date_sec")
         if not system and days is not None and secs is not None:
             simnow = datetime(year=now.year, month=1, day=1, hour=0, minute=0, second=0, microsecond=0).astimezone()
             simnow = simnow + timedelta(days=days) + timedelta(days=secs)
