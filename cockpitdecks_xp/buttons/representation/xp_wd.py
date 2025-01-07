@@ -841,17 +841,8 @@ class XPWeatherData:
 
 # Tests
 if __name__ == "__main__":
-    # drefs = {}
-    # fn = os.path.join("..", "..", "..", "aircrafts", "tests", "metar", "weather.json")
-    # if os.path.exists(fn):
-    #     with open(fn) as fp:
-    #         drefs = json.load(fp)
-
-    # # flatten arrays
-    # for d, v in drefs.items():
-    #     if type(v) is list:  # "dataref": [value, value, ...]
-    #         drefs = drefs | {f"{d}[{i}]": v[i] for i in range(len(v))} # "dataref[i]": value(i)
-    w = XPWeatherData(weather_type=WEATHER_LOCATION.REGION.value, update=True)
+    api_url = "http://192.168.1.140:8080/api/v1/datarefs"
+    w = XPWeatherData(api_url=api_url, weather_type=WEATHER_LOCATION.REGION.value, update=True)
     w.print(level=logging.DEBUG)  # writes to logger.debug
 
     w.print_cloud_layers_alt()

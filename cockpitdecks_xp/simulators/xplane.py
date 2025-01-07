@@ -804,9 +804,9 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
         for d in self.cockpit.get_simulator_variable():
             if d.startswith(CONFIG_KW.STRING_PREFIX.value):
                 d = d.replace(CONFIG_KW.STRING_PREFIX.value, "")
-                dtdrefs[d] = self.get_data(d, is_string=True)
+                dtdrefs[d] = self.get_variable(d, is_string=True)
             else:
-                dtdrefs[d] = self.get_data(d)
+                dtdrefs[d] = self.get_variable(d)
             dtdrefs[d].add_listener(self.cockpit)
         self.add_simulator_variable_to_monitor(dtdrefs)
         logger.info(f"monitoring {len(dtdrefs)} cockpit datarefs")
@@ -817,20 +817,12 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
         for d in self.get_simulator_variable():
             if d.startswith(CONFIG_KW.STRING_PREFIX.value):
                 d = d.replace(CONFIG_KW.STRING_PREFIX.value, "")
-                dtdrefs[d] = self.get_data(d, is_string=True)
+                dtdrefs[d] = self.get_variable(d, is_string=True)
             else:
-                dtdrefs[d] = self.get_data(d)
+                dtdrefs[d] = self.get_variable(d)
             dtdrefs[d].add_listener(self)
         self.add_simulator_variable_to_monitor(dtdrefs)
         logger.info(f"monitoring {len(dtdrefs)} simulator datarefs")
-
-    def get_data(self, name: str, is_string: bool = False) -> InternalVariable | Dataref:
-        """Returns data or create a new one, internal if path requires it"""
-        if name in self.all_simulator_variable.keys():
-            return self.all_simulator_variable[name]
-        if InternalVariable.is_internal_variable(path=name):
-            return self.register(variable=self.cockpit.variable_factory(name=name, is_string=is_string))
-        return self.register(variable=self.variable_factory(name=name, is_string=is_string))
 
     def datetime(self, zulu: bool = False, system: bool = False) -> datetime:
         """Returns the simulator date and time"""
@@ -847,7 +839,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
 
     #
     # Commands
-    def execute_command(self, command: Command):
+    def execute_command(self, command: Command | None):
         if command is None:
             logger.warning(f"no command")
             return
@@ -872,7 +864,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
         """
         path = dataref
         if Dataref.is_internal_variable(path):
-            d = self.get_data(path)
+            d = self.get_variable(path)
             d.update_value(new_value=value, cascade=True)
             logger.debug(f"written local dataref ({path}={value})")
             return False
