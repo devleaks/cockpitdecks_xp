@@ -21,7 +21,7 @@ from cockpitdecks_xp import __version__
 from cockpitdecks import SPAM_LEVEL, CONFIG_KW, DEFAULT_FREQUENCY, MONITOR_DATAREF_USAGE
 from cockpitdecks.variable import InternalVariable
 from cockpitdecks.simulator import Simulator, SimulatorEvent, SimulatorInstruction, SimulatorMacroInstruction
-from cockpitdecks.simulator import SimulatorVariable, SimulatorVariableListener, SimulatorVariableConsumer
+from cockpitdecks.simulator import SimulatorVariable, SimulatorVariableListener
 from cockpitdecks.resources.intvariables import INTERNAL_DATAREF
 
 logger = logging.getLogger(__name__)
@@ -668,7 +668,7 @@ class XPlaneBeacon:
                 logger.debug("..not connected")
 
 
-class XPlane(Simulator, SimulatorVariableListener, SimulatorVariableConsumer, XPlaneBeacon):
+class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
     """
     Get data from XPlane via network.
     Use a class to implement RAI Pattern for the UDP socket.
@@ -747,13 +747,13 @@ class XPlane(Simulator, SimulatorVariableListener, SimulatorVariableConsumer, XP
     # ################################
     # Factories
     #
-    def instruction_factory(self, name, **kwargs):
+    def instruction_factory(self, name, **kwargs) -> XPlaneInstruction:
         logger.debug(f"creating xplane instruction {name}")
         return XPlaneInstruction.new(name=name, simulator=self, **kwargs)
 
-    def simulator_variable_factory(self, name: str, data_type: str = "float", physical_unit: str = "") -> SimulatorVariable:
-        logger.debug(f"creating xplane data {name}")
-        return self.get_data(path=name, is_string=data_type in ["string", "str", str])
+    def variable_factory(self, name: str, is_string: bool = False) -> Dataref:
+        logger.debug(f"creating xplane dataref {name}")
+        return Dataref(path=name, is_string=is_string)
 
     def replay_event_factory(self, name: str, value):
         logger.debug(f"creating replay event {name}")
@@ -828,9 +828,9 @@ class XPlane(Simulator, SimulatorVariableListener, SimulatorVariableConsumer, XP
         """Returns data or create a new one, internal if path requires it"""
         if name in self.all_simulator_variable.keys():
             return self.all_simulator_variable[name]
-        if SimulatorVariable.is_internal_variable(path=name):
-            return self.register(simulator_variable=InternalVariable(name=name, is_string=is_string))
-        return self.register(simulator_variable=Dataref(path=name, is_string=is_string))
+        if InternalVariable.is_internal_variable(path=name):
+            return self.register(variable=self.cockpit.variable_factory(name=name, is_string=is_string))
+        return self.register(variable=self.variable_factory(name=name, is_string=is_string))
 
     def datetime(self, zulu: bool = False, system: bool = False) -> datetime:
         """Returns the simulator date and time"""
