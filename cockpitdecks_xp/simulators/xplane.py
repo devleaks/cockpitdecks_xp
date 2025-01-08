@@ -753,7 +753,9 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
 
     def variable_factory(self, name: str, is_string: bool = False) -> Dataref:
         logger.debug(f"creating xplane dataref {name}")
-        return Dataref(path=name, is_string=is_string)
+        variable = Dataref(path=name, is_string=is_string)
+        variable._sim = self
+        return variable
 
     def replay_event_factory(self, name: str, value):
         logger.debug(f"creating replay event {name}")
