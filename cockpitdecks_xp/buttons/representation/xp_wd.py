@@ -422,7 +422,7 @@ class XPWeatherData:
         if len(self.wind_layers) > 0:
             hasalt = list(filter(lambda x: x.alt_msl is not None, self.wind_layers))
             if len(hasalt) > 0:
-                lb = sorted(hasalt, key=lambda x: x.alt_msl, reverse=True)
+                lb = sorted(hasalt, key=lambda x: x.alt_msl)
                 lowest = lb[0]
                 if self.weather_type == WEATHER_LOCATION.AIRCRAFT.value:
                     speed = round(lowest.speed_kts)
@@ -511,7 +511,7 @@ class XPWeatherData:
         if len(self.wind_layers) > 0:
             hasalt = list(filter(lambda x: x.alt_msl is not None, self.wind_layers))
             if len(hasalt) > 0:
-                lb = sorted(hasalt, key=lambda x: x.alt_msl, reverse=True)
+                lb = sorted(hasalt, key=lambda x: x.alt_msl)
                 lowest = lb[0]
                 speed = 0
                 direct = None
