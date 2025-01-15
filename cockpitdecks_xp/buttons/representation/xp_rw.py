@@ -47,7 +47,6 @@ class XPRealWeatherIcon(XPWeatherBaseIcon):
     @property
     def api_url(self):
         a = self.button.sim.api_url
-        print(">>>>>>>>>", a)
         return a
 
     def init(self):
