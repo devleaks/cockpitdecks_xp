@@ -788,7 +788,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
 
     #
     # Datarefs
-    def get_simulator_variable(self) -> set:
+    def get_variables(self) -> set:
         """Returns the list of datarefs for which the xplane simulator wants to be notified."""
         ret = set(PERMANENT_SIMULATOR_DATA)
         return ret
@@ -803,7 +803,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
     def add_cockpit_datarefs(self):
         """Cockpit datarefs are always requested and used internaly by the Cockpit"""
         dtdrefs = {}
-        for d in self.cockpit.get_simulator_variable():
+        for d in self.cockpit.get_variables():
             if d.startswith(CONFIG_KW.STRING_PREFIX.value):
                 d = d.replace(CONFIG_KW.STRING_PREFIX.value, "")
                 dtdrefs[d] = self.get_variable(d, is_string=True)
@@ -816,7 +816,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
     def add_simulator_variablerefs(self):
         """Simulator datarefs are always requested and used internaly by the Simulator"""
         dtdrefs = {}
-        for d in self.get_simulator_variable():
+        for d in self.get_variables():
             if d.startswith(CONFIG_KW.STRING_PREFIX.value):
                 d = d.replace(CONFIG_KW.STRING_PREFIX.value, "")
                 dtdrefs[d] = self.get_variable(d, is_string=True)
