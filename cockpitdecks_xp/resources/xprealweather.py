@@ -681,6 +681,13 @@ class XPRealWeatherData(WeatherData):
 
         return lines
 
+    # Past data
+    def get_metar_for(self, icao: str) -> list:
+        return []
+
+    def get_older_metar(self, icao: str) -> list:
+        return []
+
     # def print(self, level=logging.INFO):
     #     # debug, test
     #     width = 70
