@@ -1,6 +1,7 @@
 """
 A METAR is a weather situation at a named location, usually an airport.
 """
+
 from __future__ import annotations
 import logging
 import re
@@ -10,6 +11,7 @@ from enum import Enum
 from typing import List
 
 import requests
+
 # import io
 # from tabulate import tabulate
 from avwx import Station, Metar
@@ -26,6 +28,7 @@ class WEATHER_LOCATION(Enum):
     #
     AIRCRAFT = "aircraft"
     REGION = "region"
+
 
 def nowutc() -> datetime:
     return datetime.now(timezone.utc)
@@ -56,7 +59,7 @@ class XPRealWeatherData(WeatherData):
         self.wind_layers: List[WindLayer] = []  #  Defined wind layers. Not all layers are always defined. up to 13 layers(!)
         self.cloud_layers: List[CloudLayer] = []  #  Defined cloud layers. Not all layers are always defined. up to 3 layers
 
-        self.generated_metar_raw:str | None = None
+        self.generated_metar_raw: str | None = None
 
         # working variables
         self.reading_datarefs = Lock()
@@ -92,8 +95,7 @@ class XPRealWeatherData(WeatherData):
     # WeatherData Interface
     #
     def check_station(self) -> bool:
-        """Returns whether Station needs check and updating
-        """
+        """Returns whether Station needs check and updating"""
         # 1. No station, need to get one
         if not hasattr(self, "_station") or self._station is None:
             logger.debug("no station")
@@ -102,7 +104,7 @@ class XPRealWeatherData(WeatherData):
         now = nowutc()
         if (now - self._station_last_checked).seconds < self._weather_check_freq:
             logger.debug("not expired")
-            if self.further_than(self.min_distance_km): # did we move far?
+            if self.further_than(self.min_distance_km):  # did we move far?
                 logger.debug(f"moved")
                 (nearest, coords) = Station.nearest(lat=self._last_position[0], lon=self._last_position[1], max_coord_distance=150000)
                 if nearest is not None:
@@ -113,7 +115,7 @@ class XPRealWeatherData(WeatherData):
             else:
                 logger.debug(f"not moved enough")
             # else we did not move far enough, no need to update station
-        else: # time to check
+        else:  # time to check
             logger.debug("expired, need to check")
             return True
         return False
@@ -363,8 +365,7 @@ class XPRealWeatherData(WeatherData):
     # METAR Groups
     #
     def get_station(self) -> Station:
-        """Get station at location/time weather data was last fetched
-        """
+        """Get station at location/time weather data was last fetched"""
         if self.xp_real_weather is None:
             return (None, (0, 0))
         lat = self.xp_real_weather.latitude
