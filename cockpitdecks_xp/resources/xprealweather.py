@@ -5,10 +5,11 @@ A METAR is a weather situation at a named location, usually an airport.
 from __future__ import annotations
 import logging
 import re
-from threading import Lock
+from threading import Lock, current_thread
 from datetime import datetime, timezone
 from enum import Enum
-from typing import List
+from typing import List, Any
+import traceback
 
 import requests
 
@@ -50,7 +51,7 @@ class XPRealWeatherData(WeatherData):
 
         self.imperial = False  # currently unused, reminder to think about it (METAR differ in US/rest of the world)
         self.move_with_aircraft = False
-        self.min_distance_km = 1
+        self.min_distance_km = 30  # km
 
         self.station = None
 
@@ -64,17 +65,15 @@ class XPRealWeatherData(WeatherData):
 
         # working variables
         self.reading_datarefs = Lock()
-        self.min_time_between_collection = 60
-        self._last_datarefs = None
-        self._weather_last_checked = None
+        self._weather_last_checked = None  # None means either never collected and/or force collection
 
         # Meta data
         self._last_position: tuple = (0, 0)
 
         # Debugging values
-        self._check_freq = 30 # seconds
-        self._station_check_freq = 5 * 60  # seconds
-        self._weather_check_freq = 60 # 10 * 60  # seconds
+        # self._check_freq = 30 # seconds
+        # self._station_check_freq = 60  # seconds
+        # self._weather_check_freq = 90  # seconds
 
 
     @property
@@ -100,6 +99,16 @@ class XPRealWeatherData(WeatherData):
     # ################################################
     # WeatherData Interface
     #
+    def set_station(self, station: Any):
+        if type(station) is Station:
+            self.station = station
+            return
+        newstation = Station.from_icao(icao=station)
+        if newstation is not None:
+            self.station = newstation
+            return
+        logger.warning(f"could not find station {station} ({type(station)})")
+
     def check_station(self) -> bool:
         """Returns whether Station needs check and updating"""
         # 1. No station, need to get one
@@ -111,13 +120,15 @@ class XPRealWeatherData(WeatherData):
         if (now - self._station_last_checked).seconds < self._station_check_freq:
             logger.debug("station not expired")
             if self.further_than(self.min_distance_km):  # did we move far?
-                logger.debug(f"moved")
+                logger.debug("moved")
                 (nearest, coords) = Station.nearest(lat=self._last_position[0], lon=self._last_position[1], max_coord_distance=150000)
                 if nearest is not None:
-                    logger.debug(f"new nearest {nearest.icao}")
                     if nearest.icao != self.station.icao:
+                        logger.debug(f"new nearest {nearest.icao}")
                         self._station = nearest
                         return True
+                    else:
+                        logger.debug(f"nearest {nearest.icao} unchanged")
             else:
                 logger.debug("not moved enough")
             # else we did not move far enough, no need to update station
@@ -127,13 +138,15 @@ class XPRealWeatherData(WeatherData):
         return False
 
     def station_changed(self):
+        """Called when station has changed"""
         logger.debug("station changed, invalidating weather")
         self._weather_last_checked = None  # forget about old values
         self._station_last_checked = nowutc()
         self.weather_changed()
 
     def check_weather(self) -> bool:
-        if not hasattr(self, "_weather") or self._weather is None:
+        """Checks whether weather needs updating for whatever reason"""
+        if not hasattr(self, "_weather") or self._weather is None or self._weather_last_checked is None:
             logger.debug("no weather")
             return True
         now = nowutc()
@@ -152,54 +165,6 @@ class XPRealWeatherData(WeatherData):
         else:
             logger.debug("weather unchanged")
 
-    def update_weather(self) -> bool:
-        if not self.connected:
-            logger.warning("not connected")
-            return False
-
-        if self.api_url is None:
-            logger.warning("no api url")
-            return False
-
-        DATAREF_WEATHER = AIRCRAFT_DATAREFS if self.xp_real_weather_type == WEATHER_LOCATION.AIRCRAFT.value else REGION_DATAREFS
-        DATAREF_CLOUD = DATAREF_AIRCRAFT_CLOUD if self.xp_real_weather_type == WEATHER_LOCATION.AIRCRAFT.value else DATAREF_REGION_CLOUD
-        DATAREF_WIND = DATAREF_AIRCRAFT_WIND if self.xp_real_weather_type == WEATHER_LOCATION.AIRCRAFT.value else DATAREF_REGION_WIND
-
-        now = nowutc()
-        with self.reading_datarefs:
-            newcollection = True
-            if self._weather_last_checked is None:
-                logger.debug("dataref initial collection")
-                self._last_datarefs = self.collect_weather_datarefs()
-                self._weather_last_checked = now
-            elif (now - self._weather_last_checked).seconds > self._weather_check_freq:
-                logger.debug("datarefs expired")
-                self._last_datarefs = self.collect_weather_datarefs()
-                self._weather_last_checked = now
-            else:
-                logger.debug("datarefs not expired")
-                newcollection = False
-
-        if not newcollection: # not updated
-            return False
-
-        self.xp_real_weather = XPRealWeatherDatarefs(DATAREF_WEATHER, self._last_datarefs)
-        self.wind_layers: List[WindLayer] = []  #  Defined wind layers. Not all layers are always defined. up to 13 layers(!)
-        self.cloud_layers: List[CloudLayer] = []  #  Defined cloud layers. Not all layers are always defined. up to 3 layers
-
-        for i in range(self.CLOUD_LAYERS):
-            self.cloud_layers.append(CloudLayer(DATAREF_CLOUD, self._last_datarefs, i))
-
-        for i in range(self.WIND_LAYERS):
-            self.wind_layers.append(WindLayer(DATAREF_WIND, self._last_datarefs, i))
-
-        updated = self.make_metar()  # reports if METAR has changed
-
-        if updated:
-            self._weather_last_updated = nowutc()
-
-        return updated
-
     # ################################################
     # Utility functions
     #
@@ -213,6 +178,54 @@ class XPRealWeatherData(WeatherData):
         dist = distance(station, self._last_position)
         logger.info(f"further: {round(dist, 1)} vs {kilometers}km")
         return dist > kilometers
+
+    def update_weather(self) -> bool:
+        if not self.connected:
+            logger.warning("not connected")
+            return False
+
+        if self.api_url is None:
+            logger.warning("no api url")
+            return False
+
+        DATAREF_WEATHER = AIRCRAFT_DATAREFS if self.xp_real_weather_type == WEATHER_LOCATION.AIRCRAFT.value else REGION_DATAREFS
+        DATAREF_CLOUD = DATAREF_AIRCRAFT_CLOUD if self.xp_real_weather_type == WEATHER_LOCATION.AIRCRAFT.value else DATAREF_REGION_CLOUD
+        DATAREF_WIND = DATAREF_AIRCRAFT_WIND if self.xp_real_weather_type == WEATHER_LOCATION.AIRCRAFT.value else DATAREF_REGION_WIND
+
+        with self.reading_datarefs:
+            now = nowutc()
+            newcollection = True
+            if self._weather_last_checked is None:
+                logger.debug("dataref initial collection")
+                weather_drefs = self.collect_weather_datarefs()
+                self._weather_last_checked = now
+            elif (now - self._weather_last_checked).seconds > self._weather_check_freq:
+                logger.debug("datarefs expired")
+                weather_drefs = self.collect_weather_datarefs()
+                self._weather_last_checked = now
+            else:
+                logger.debug(f"datarefs not expired, last collected at {self._weather_last_checked}")
+                newcollection = False
+
+        if not newcollection: # not updated
+            return False
+
+        self.xp_real_weather = XPRealWeatherDatarefs(DATAREF_WEATHER, weather_drefs)
+        self.wind_layers: List[WindLayer] = []  #  Defined wind layers. Not all layers are always defined. up to 13 layers(!)
+        self.cloud_layers: List[CloudLayer] = []  #  Defined cloud layers. Not all layers are always defined. up to 3 layers
+
+        for i in range(self.CLOUD_LAYERS):
+            self.cloud_layers.append(CloudLayer(DATAREF_CLOUD, weather_drefs, i))
+
+        for i in range(self.WIND_LAYERS):
+            self.wind_layers.append(WindLayer(DATAREF_WIND, weather_drefs, i))
+
+        updated = self.make_metar()  # reports if METAR has changed
+
+        if updated:
+            self._weather_last_updated = nowutc()
+
+        return updated
 
     def collect_weather_datarefs(self, position_only: bool = False) -> dict:
         DATA = "data"
@@ -394,7 +407,7 @@ class XPRealWeatherData(WeatherData):
         return t1
 
     # ################################################
-    # METAR Groups
+    # METAR and METAR groups
     #
     def get_station(self) -> Station:
         """Get station at location/time weather data was last fetched"""
@@ -405,10 +418,14 @@ class XPRealWeatherData(WeatherData):
         return Station.nearest(lat=lat, lon=lon, max_coord_distance=150000)
 
     def metar_group_station_icao(self, remember: bool = False) -> str:
+        if self.station is not None:
+            return self.station.icao
         (nearest, coords) = self.get_station()
-        if nearest is not None and remember:
-            self.station = nearest
-        return "ICAO" if nearest is None else nearest.icao
+        if nearest is not None:
+            if remember:
+                self._station = nearest
+            return nearest.icao
+        return "ICAO"
 
     def metar_group_time(self) -> str:
         t = datetime.now().astimezone(tz=timezone.utc)
@@ -734,7 +751,7 @@ class XPRealWeatherData(WeatherData):
 
         return lines
 
-    # Past data
+    # Past data (station plot interface for trends)
     def get_metar_for(self, icao: str) -> list:
         return []
 
