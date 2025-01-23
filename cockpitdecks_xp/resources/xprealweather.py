@@ -5,11 +5,10 @@ A METAR is a weather situation at a named location, usually an airport.
 from __future__ import annotations
 import logging
 import re
-from threading import Lock, current_thread
+from threading import Lock
 from datetime import datetime, timezone
 from enum import Enum
 from typing import List, Any
-import traceback
 
 import requests
 
@@ -21,7 +20,7 @@ from cockpitdecks.resources.weather import WeatherData
 from cockpitdecks.resources.geo import distance
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+# logger.setLevel(logging.DEBUG)
 
 
 class WEATHER_LOCATION(Enum):
@@ -45,15 +44,15 @@ class XPRealWeatherData(WeatherData):
     CLOUD_LAYERS = 3
     WIND_LAYERS = 13
 
-    def __init__(self, simulator, weather_type: str = WEATHER_LOCATION.REGION.value, update: bool = True):
-        WeatherData.__init__(self, name=weather_type, config={})
+    def __init__(self, name: str, simulator, weather_type: str = WEATHER_LOCATION.REGION.value, update: bool = True):
+        WeatherData.__init__(self, name=name, config={})
         self.simulator = simulator  # where to get data from
 
         self.imperial = False  # currently unused, reminder to think about it (METAR differ in US/rest of the world)
         self.move_with_aircraft = False
-        self.min_distance_km = 30  # km
+        self.min_distance_km = 30  # km, airliner = 900km/h, 15km/min, check occurs every minute
 
-        self.station = None
+        self._station = None
 
         self.xp_real_weather_type = weather_type
         self.xp_real_weather: XPRealWeatherDatarefs | None = None
@@ -74,7 +73,6 @@ class XPRealWeatherData(WeatherData):
         # self._check_freq = 30 # seconds
         # self._station_check_freq = 60  # seconds
         # self._weather_check_freq = 90  # seconds
-
 
     @property
     def connected(self):
@@ -207,7 +205,7 @@ class XPRealWeatherData(WeatherData):
                 logger.debug(f"datarefs not expired, last collected at {self._weather_last_checked}")
                 newcollection = False
 
-        if not newcollection: # not updated
+        if not newcollection:  # not updated
             return False
 
         self.xp_real_weather = XPRealWeatherDatarefs(DATAREF_WEATHER, weather_drefs)
@@ -661,7 +659,7 @@ class XPRealWeatherData(WeatherData):
                 logger.debug(f"generated METAR {self.generated_metar_raw} updated")
             else:
                 logger.debug(f"generated METAR {self.generated_metar_raw} unchanged")
-        else: # first metar
+        else:  # first metar
             self.generated_metar_raw = metar
             updated = True
             logger.debug(f"generated METAR {self.generated_metar_raw} created")
@@ -699,11 +697,11 @@ class XPRealWeatherData(WeatherData):
 
         press = self.weather_pressure()
         press = f"{round(press/100)}" if press is not None else "no pressure"
-        lines.append(f"Press: {press}")
+        lines.append(f"Press: {press} hPa")
 
         temp, dewp = self.weather_temperatures()
         temp = f"{round(temp)}" if temp is not None else "no temperature"
-        lines.append(f"Temp: {temp}")
+        lines.append(f"Temp: {temp} °C")
 
         vis = self.weather_visibility()
         vis = round(vis, 1) if vis is not None else "no visibility info"
@@ -714,7 +712,7 @@ class XPRealWeatherData(WeatherData):
         currwl = self.wind_layers[widx]
 
         dewp = round(currwl.dew_point, 1)
-        lines.append(f"DewP:{dewp} (W{widx})")
+        lines.append(f"DewP: {dewp} °C (W{widx})")
 
         if self.xp_real_weather_type == WEATHER_LOCATION.AIRCRAFT.value:
             speed = round(currwl.speed_kts)
@@ -735,19 +733,29 @@ class XPRealWeatherData(WeatherData):
         # Cloud layer info
         cidx = layer_index % len(self.cloud_layers)
         currcl = self.cloud_layers[cidx]
-        covr8 = int(currcl.coverage * 8)
-        covcode = "SKC"
-        if 0.5 < covr8 <= 2:
-            covcode = "FEW"
-        elif 2 < covr8 <= 4:
-            covcode = "SCT"
-        elif 4 < covr8 <= 7:
-            covcode = "BKN"
+        if currcl.coverage is not None:
+            covr8 = int(currcl.coverage * 8)
+            covcode = "SKC"
+            if 0.5 < covr8 <= 2:
+                covcode = "FEW"
+            elif 2 < covr8 <= 4:
+                covcode = "SCT"
+            elif 4 < covr8 <= 7:
+                covcode = "BKN"
+            elif 7 < covr8:
+                covcode = "OVC"
         else:
-            covcode = "OVC"
-        ceil = round(currcl.base) if currcl.base is not None else 0
-        ceilfl = f"{round(ceil * 3.28084 / 100):03d}"
-        lines.append(f"Clouds:{covr8}/8 {covcode} {CLOUD_TYPE[int(currcl.cloud_type)]}, ceil FL{ceilfl} ({ceil}m) (C{cidx})")
+            covr = "/"
+            covcode = "///"
+        lines.append(f"Clouds: {covr8}/8 {covcode} {CLOUD_TYPE[int(currcl.cloud_type)] if currcl.cloud_type is not None else ''}")
+
+        if currcl.base is not None:
+            ceil = round(currcl.base)
+            ceilfl = f"{round(ceil * 3.28084 / 100):03d}"
+        else:
+            ceil = "////"
+            ceilfl = "///"
+        lines.append(f"Ceil FL{ceilfl} ({ceil}m) (C{cidx})")
 
         return lines
 
@@ -964,7 +972,7 @@ if __name__ == "__main__":
     # print("wind layer alt", w.wind_layers[7].alt_msl)
 
     print(w.generated_metar_raw)
-    print("\n".join(w.generated_metar.summary.split(", ")))
+    print("\n".join(w.weather.summary.split(", ")))
     print("---")
     print("\n".join(w.get_lines()))
 
