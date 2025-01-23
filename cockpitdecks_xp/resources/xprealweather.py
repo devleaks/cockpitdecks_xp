@@ -101,7 +101,7 @@ class XPRealWeatherData(WeatherData):
         if type(station) is Station:
             self.station = station
             return
-        newstation = Station.from_icao(icao=station)
+        newstation = Station.from_icao(ident=station)
         if newstation is not None:
             self.station = newstation
             return

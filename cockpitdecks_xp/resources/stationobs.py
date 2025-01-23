@@ -24,7 +24,7 @@ class StationObservable(Observable):
         self.check_time = 30  # seconds
         self._last_checked = datetime.now() - timedelta(seconds=self.check_time)
         self._last_updated = datetime.now()
-        self.station: Station = Station.from_icao(icao=self.DEUFAULT_STATION)
+        self.station: Station = Station.from_icao(ident=self.DEFAULT_STATION)
         self.station_variable = simulator.get_variable(name=Variable.internal_variable_name(name=WEATHER_STATION_VARIABLE), is_string=True)
 
     def get_variables(self) -> set:
