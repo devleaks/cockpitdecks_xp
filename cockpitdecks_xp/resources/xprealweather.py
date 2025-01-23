@@ -50,7 +50,7 @@ class XPRealWeatherData(WeatherData):
 
         self.imperial = False  # currently unused, reminder to think about it (METAR differ in US/rest of the world)
         self.move_with_aircraft = False
-        self.min_distance_km = 30
+        self.min_distance_km = 1
 
         self.station = None
 
@@ -60,16 +60,22 @@ class XPRealWeatherData(WeatherData):
         self.cloud_layers: List[CloudLayer] = []  #  Defined cloud layers. Not all layers are always defined. up to 3 layers
 
         self.generated_metar_raw: str | None = None
+        self.previous_weather = []
 
         # working variables
         self.reading_datarefs = Lock()
         self.min_time_between_collection = 60
         self._last_datarefs = None
-        self._last_datarefs_time = None
+        self._weather_last_checked = None
 
         # Meta data
         self._last_position: tuple = (0, 0)
-        self.previous_weather = []
+
+        # Debugging values
+        self._check_freq = 30 # seconds
+        self._station_check_freq = 5 * 60  # seconds
+        self._weather_check_freq = 60 # 10 * 60  # seconds
+
 
     @property
     def connected(self):
@@ -78,10 +84,10 @@ class XPRealWeatherData(WeatherData):
         return self.simulator.connected
 
     @property
-    def api_url(self):
+    def api_url(self) -> str | None:
         if type(self.simulator) is str:  # cheat for testing
             return self.simulator
-        return self.simulator.api_url + "/datarefs"
+        return self.simulator.api_url + "/datarefs" if self.simulator.api_url is not None else None
 
     @property
     def label(self):
@@ -102,8 +108,8 @@ class XPRealWeatherData(WeatherData):
             return True
         # 2. Station and long time since check
         now = nowutc()
-        if (now - self._station_last_checked).seconds < self._weather_check_freq:
-            logger.debug("not expired")
+        if (now - self._station_last_checked).seconds < self._station_check_freq:
+            logger.debug("station not expired")
             if self.further_than(self.min_distance_km):  # did we move far?
                 logger.debug(f"moved")
                 (nearest, coords) = Station.nearest(lat=self._last_position[0], lon=self._last_position[1], max_coord_distance=150000)
@@ -113,18 +119,18 @@ class XPRealWeatherData(WeatherData):
                         self._station = nearest
                         return True
             else:
-                logger.debug(f"not moved enough")
+                logger.debug("not moved enough")
             # else we did not move far enough, no need to update station
         else:  # time to check
-            logger.debug("expired, need to check")
+            logger.debug("station expired, need to check")
             return True
         return False
 
     def station_changed(self):
+        logger.debug("station changed, invalidating weather")
+        self._weather_last_checked = None  # forget about old values
         self._station_last_checked = nowutc()
-        if self.update_weather():
-            logger.debug("weather updated")
-            self.weather_changed()
+        self.weather_changed()
 
     def check_weather(self) -> bool:
         if not hasattr(self, "_weather") or self._weather is None:
@@ -135,12 +141,24 @@ class XPRealWeatherData(WeatherData):
             logger.debug("weather expired")
             return True
         else:
-            logger.debug("weather valid")
+            logger.debug("weather not expired")
         return False
+
+    def weather_changed(self):
+        """Called when weather data has changed"""
+        if self.update_weather():
+            logger.debug("weather updated")
+            super().weather_changed()
+        else:
+            logger.debug("weather unchanged")
 
     def update_weather(self) -> bool:
         if not self.connected:
             logger.warning("not connected")
+            return False
+
+        if self.api_url is None:
+            logger.warning("no api url")
             return False
 
         DATAREF_WEATHER = AIRCRAFT_DATAREFS if self.xp_real_weather_type == WEATHER_LOCATION.AIRCRAFT.value else REGION_DATAREFS
@@ -148,19 +166,22 @@ class XPRealWeatherData(WeatherData):
         DATAREF_WIND = DATAREF_AIRCRAFT_WIND if self.xp_real_weather_type == WEATHER_LOCATION.AIRCRAFT.value else DATAREF_REGION_WIND
 
         now = nowutc()
-        if self._last_datarefs_time is None:
-            logger.debug("dataref initial collection")
-            self._last_datarefs = self.collect_weather_datarefs()
-            self._last_datarefs_time = now
-            self._weather_last_checked = now
-        elif (now - self._last_datarefs_time).seconds > self.min_time_between_collection:
-            logger.debug("dataref expired")
-            self._last_datarefs = self.collect_weather_datarefs()
-            self._last_datarefs_time = now
-            self._weather_last_checked = now
-        else:
-            logger.debug("dataref valid")
-            logger.info("dataref too fresh, not recollecting")
+        with self.reading_datarefs:
+            newcollection = True
+            if self._weather_last_checked is None:
+                logger.debug("dataref initial collection")
+                self._last_datarefs = self.collect_weather_datarefs()
+                self._weather_last_checked = now
+            elif (now - self._weather_last_checked).seconds > self._weather_check_freq:
+                logger.debug("datarefs expired")
+                self._last_datarefs = self.collect_weather_datarefs()
+                self._weather_last_checked = now
+            else:
+                logger.debug("datarefs not expired")
+                newcollection = False
+
+        if not newcollection: # not updated
+            return False
 
         self.xp_real_weather = XPRealWeatherDatarefs(DATAREF_WEATHER, self._last_datarefs)
         self.wind_layers: List[WindLayer] = []  #  Defined wind layers. Not all layers are always defined. up to 13 layers(!)
@@ -172,11 +193,12 @@ class XPRealWeatherData(WeatherData):
         for i in range(self.WIND_LAYERS):
             self.wind_layers.append(WindLayer(DATAREF_WIND, self._last_datarefs, i))
 
-        self.make_metar()
+        updated = self.make_metar()  # reports if METAR has changed
 
-        self._weather_last_updated = nowutc()
+        if updated:
+            self._weather_last_updated = nowutc()
 
-        return True
+        return updated
 
     # ################################################
     # Utility functions
@@ -230,12 +252,22 @@ class XPRealWeatherData(WeatherData):
         if position_only:
             WEATHER_DATAFEFS = DATAREF_LOCATION
 
-        logger.info(f"collecting {self.xp_real_weather_type} weather datarefs..")
+        if position_only:
+            logger.info(f"collecting position datarefs..")
+        else:
+            logger.info(f"collecting {self.xp_real_weather_type} weather datarefs..")
         weather_datarefs = {}
+        debug = True
+        if debug:
+            print("collecting ", end="", flush=True)
         for d in WEATHER_DATAFEFS.values():
             v = get_dataref_value(d)
             weather_datarefs[d] = v
-            logger.debug(f"{d}={v}")
+            # logger.debug(f"{d}={v}")
+            if debug:
+                print(".", end="", flush=True)
+        if debug:
+            print(" done")
         logger.info(f"..collected {len(weather_datarefs)} datarefs")
 
         # flatten arrays
@@ -580,7 +612,7 @@ class XPRealWeatherData(WeatherData):
         Generated string is placed in self.generated_metar_raw.
         METAR is placed in self._weather if valid
 
-        Returns True if valid METAR generated
+        Returns True if METAR has changed and is valid (can be used).
         """
         metar = self.metar_group_station_icao(remember=self.station is None)
         metar = metar + " " + self.metar_group_time()
@@ -600,21 +632,42 @@ class XPRealWeatherData(WeatherData):
         metar = metar + " " + self.metar_group_remarks()
 
         # Cleanup and parse
+        metar = re.sub(" +", " ", metar)  # clean multiple spaces
+        metar = metar.strip()
+
+        updated = False
         if self.generated_metar_raw is not None:  # keep previous
-            self.previous_weather.append(self.generated_metar_raw)
-        self.generated_metar_raw = re.sub(" +", " ", metar)  # clean multiple spaces
-        try:
-            self._weather = Metar.from_report(report=self.generated_metar_raw)
-            return True
-        except:
-            self._weather = None
-            logger.warning(f"failed to parse METAR {self.generated_metar_raw}", exc_info=True)
+            if metar != self.generated_metar_raw:
+                self.previous_weather.append(self.generated_metar_raw)
+                self.generated_metar_raw = metar
+                updated = True
+                logger.debug(f"generated METAR {self.generated_metar_raw} updated")
+            else:
+                logger.debug(f"generated METAR {self.generated_metar_raw} unchanged")
+        else: # first metar
+            self.generated_metar_raw = metar
+            updated = True
+            logger.debug(f"generated METAR {self.generated_metar_raw} created")
+
+        if updated or self.weather is None:
+            oldweather = self.weather
+            try:
+                self._weather = Metar.from_report(report=self.generated_metar_raw)
+                logger.info(f"METAR {self._weather.raw}")
+                return True
+            except:
+                logger.warning(f"failed to parse METAR {self.generated_metar_raw}", exc_info=True)
+                if self.weather is not None:
+                    logger.warning(f"METAR discrepency generated={self.generated_metar_raw}, previous={self.weather.raw}")
+                    self._weather = oldweather  # so that imaging can work
+        else:
+            logger.debug(f"METAR {self.weather.raw} not changed")
         return False
 
     # ################################################
     # Summary output
     #
-    def get_metar_lines(self, layer_index: int = 0) -> list:
+    def get_lines(self, layer_index: int = 0) -> list:
         lines = []
 
         if self.xp_real_weather is None:
@@ -896,6 +949,6 @@ if __name__ == "__main__":
     print(w.generated_metar_raw)
     print("\n".join(w.generated_metar.summary.split(", ")))
     print("---")
-    print("\n".join(w.get_metar_lines()))
+    print("\n".join(w.get_lines()))
 
     # w.update()

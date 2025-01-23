@@ -31,4 +31,4 @@ class XPRealWeatherMetarIcon(WeatherBaseIcon):
         if self.weather_data.weather is not None:
             return self.weather_data.weather.summary.split(",")
         # Backup! (from raw data)
-        return self.weather_data.get_metar_lines()
+        return self.weather_data.get_lines()
