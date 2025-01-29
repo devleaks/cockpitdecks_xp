@@ -610,9 +610,9 @@ class XPRealWeatherData(WeatherData):
     def metar_group_pressure(self) -> str:
         press = None
         if self.xp_real_weather_type == WEATHER_LOCATION.AIRCRAFT.value:
-            press = f"{round(self.xp_real_weather.qnh/100)}"
+            press = f"Q{round(self.xp_real_weather.qnh/100)}"
         else:
-            press = f"{round(self.xp_real_weather.qnh_pas/100)}"
+            press = f"Q{round(self.xp_real_weather.qnh_pas/100)}"
         return press
 
     def metar_group_forecast(self) -> str:
@@ -952,7 +952,7 @@ class Time(DatarefAccessor):
 # Tests
 if __name__ == "__main__":
     api_url = "http://192.168.1.140:8080/api/v1/datarefs"
-    w = XPRealWeatherData(simulator=api_url, weather_type=WEATHER_LOCATION.REGION.value, update=True)
+    w = XPRealWeatherData(name="test-main", simulator=api_url, weather_type=WEATHER_LOCATION.REGION.value, update=True)
     w.update_weather()
     # w.print(level=logging.DEBUG)  # writes to logger.debug
 
