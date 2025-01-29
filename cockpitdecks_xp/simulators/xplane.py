@@ -236,23 +236,24 @@ class DatarefEvent(SimulatorEvent):
             if self.sim is None:
                 logger.warning("no simulator")
                 return False
-            dataref = self.sim.all_simulator_variable.get(self.dataref_path)
+            # should be: dataref = self.sim.get_variable(self.dataref_path)
+            dataref = self.sim.cockpit.variable_database.get(self.dataref_path)
             if dataref is None:
                 logger.debug(f"dataref {self.dataref_path} not found in database")
-                return
+                return False
 
             try:
                 logger.debug(f"updating {dataref.name}..")
                 self.handling()
                 dataref.update_value(self.value, cascade=self.cascade)
                 self.handled()
-                logger.debug(f"..updated")
+                logger.debug("..updated")
             except:
-                logger.warning(f"..updated with error", exc_info=True)
+                logger.warning("..updated with error", exc_info=True)
                 return False
         else:
             self.enqueue()
-            logger.debug(f"enqueued")
+            logger.debug("enqueued")
         return True
 
 
@@ -828,7 +829,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
 
     def datetime(self, zulu: bool = False, system: bool = False) -> datetime:
         """Returns the simulator date and time"""
-        if DATETIME_DATAREFS[0] not in self.all_simulator_variable.keys():  # hack, means dref not created yet
+        if not self.cockpit.variable_database.exists(DATETIME_DATAREFS[0]):  # hack, means dref not created yet
             return super().datetime(zulu=zulu, system=system)
         now = datetime.now().astimezone()
         days = self.get_simulator_variable_value("sim/time/local_date_days")
@@ -1199,11 +1200,12 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
             logger.info(f">>>>> monitoring--{len(datarefs)}/{len(self.datarefs)}/{self._max_monitored}")
 
     def remove_all_datarefs(self):
-        if not self.connected and len(self.all_simulator_variable) > 0:
-            logger.debug(f"would remove {self.all_simulator_variable.keys()}")
+        datarefs = [d for d in self.cockpit.variable_database.database.values() if type(d) is Dataref]
+        if not self.connected and len(datarefs) > 0:
+            logger.debug(f"would remove {', '.join([d.name for d in datarefs])}")
             return
-        # Not necessary:
-        # self.remove_simulator_variable_to_monitor(self.all_simulator_variable)
+        # This is not necessary:
+        # self.remove_simulator_variable_to_monitor(datarefs)
         super().remove_all_simulator_variable()
 
     def add_all_datarefs_to_monitor(self):
@@ -1214,7 +1216,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
         # Add those to monitor
         prnt = []
         for path in self.simulator_variable_to_monitor.keys():
-            d = self.all_simulator_variable.get(path)
+            d = self.cockpit.variable_database.get(path)
             if d is not None:
                 if not d.is_string:
                     if self.add_dataref_to_monitor(d.name, freq=d.update_frequency):
