@@ -813,7 +813,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
             else:
                 dtdrefs[d] = self.get_variable(d)
             dtdrefs[d].add_listener(self.cockpit)
-        self.add_simulator_variable_to_monitor(dtdrefs)
+        self.add_simulator_variable_to_monitor(datarefs=dtdrefs, reason="permanent datarefs (simulator)")
         logger.info(f"monitoring {len(dtdrefs)} cockpit datarefs")
 
     def add_simulator_variablerefs(self):
