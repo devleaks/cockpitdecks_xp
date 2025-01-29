@@ -925,7 +925,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
                 del self.datarefs[idx]
         else:
             if freq != 0 and len(self.datarefs) > MAX_DREF_COUNT:
-                # logger.warning(f"requesting too many datarefs ({len(self.datarefs)})")
+                logger.warning(f"requesting too many datarefs ({len(self.datarefs)}/{MAX_DREF_COUNT})")
                 return False
 
             idx = self.datarefidx
