@@ -397,16 +397,18 @@ class SetDataref(XPlaneInstruction):
 # #############################################
 # SIMULATOR
 #
-# A velue in X-Plane Simulatot
+# A value in X-Plane Simulator
 
 # Data too delicate to be put in constant.py
 # !! adjust with care !!
 # UDP sends at most ~40 to ~50 dataref values per packet.
 LOOP_ALIVE = 100  # report loop activity every 1000 executions on DEBUG, set to None to suppress output
-RECONNECT_TIMEOUT = 10  # seconds
-SOCKET_TIMEOUT = 5  # seconds
+
+RECONNECT_TIMEOUT = 10  # seconds, times between attempts to reconnect to X-Plane when not connected
+SOCKET_TIMEOUT = 5  # seconds, assumes no awser if no message recevied withing that timeout
 MAX_TIMEOUT_COUNT = 5  # after x timeouts, assumes connection lost, disconnect, and restart later
-MAX_DREF_COUNT = 80  # Maximum number of dataref that can be requested to X-Plane, CTD around ~100 datarefs
+
+MAX_DREF_COUNT = 110  # Maximum number of dataref that can be requested to X-Plane, CTD around ~100 datarefs
 
 # String dataref listener
 ANY = "0.0.0.0"
@@ -418,7 +420,7 @@ SDL_SOCKET_TIMEOUT = SDL_UPDATE_FREQ + 1.0  # should be larger or equal to PI_st
 
 XP_MIN_VERSION = 121100
 
-# When this dataref changes, the loaded aircraft has changed
+# Always requested datarefs (time and simulation speed)
 #
 DATETIME_DATAREFS = [
     "sim/time/local_date_days",
@@ -925,7 +927,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
                 del self.datarefs[idx]
         else:
             if freq != 0 and len(self.datarefs) > MAX_DREF_COUNT:
-                logger.warning(f"requesting too many datarefs ({len(self.datarefs)}/{MAX_DREF_COUNT})")
+                logger.warning(f"requesting too many datarefs ({len(self.datarefs)}/{MAX_DREF_COUNT}, {path})")
                 return False
 
             idx = self.datarefidx
@@ -1154,7 +1156,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
         self._dref_cache = {}
         logger.debug("done")
 
-    def add_simulator_variable_to_monitor(self, datarefs):
+    def add_simulator_variable_to_monitor(self, datarefs, reason: str = None):
         if not self.connected:
             logger.debug(f"would add {self.remove_local_datarefs(datarefs.keys())}")
             return
@@ -1173,9 +1175,9 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
 
         logger.log(SPAM_LEVEL, f"add_simulator_variable_to_monitor: added {prnt}")
         if MONITOR_DATAREF_USAGE:
-            logger.info(f">>>>> monitoring++{len(datarefs)}/{len(self.datarefs)}/{self._max_monitored}")
+            logger.info(f">>>>> monitoring++{len(datarefs)}/{len(self.datarefs)}/{self._max_monitored} {reason if reason is not None else ''}")
 
-    def remove_simulator_variable_to_monitor(self, datarefs):
+    def remove_simulator_variable_to_monitor(self, datarefs, reason: str = None):
         if not self.connected and len(self.simulator_variable_to_monitor) > 0:
             logger.debug(f"would remove {datarefs.keys()}/{self._max_monitored}")
             return
@@ -1197,7 +1199,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
         logger.debug(f"removed {prnt}")
         super().remove_simulator_variable_to_monitor(datarefs)
         if MONITOR_DATAREF_USAGE:
-            logger.info(f">>>>> monitoring--{len(datarefs)}/{len(self.datarefs)}/{self._max_monitored}")
+            logger.info(f">>>>> monitoring--{len(datarefs)}/{len(self.datarefs)}/{self._max_monitored} {reason if reason is not None else ''}")
 
     def remove_all_datarefs(self):
         datarefs = [d for d in self.cockpit.variable_database.database.values() if type(d) is Dataref]
