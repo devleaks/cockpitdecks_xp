@@ -801,7 +801,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
 
     def add_permanently_monitored_simulator_variables(self):
         """Add simulator variables coming from different sources (cockpit, simulator itself, etc.)
-           that are always monitored (for all aircrafts)
+        that are always monitored (for all aircrafts)
         """
         dtdrefs = self.get_permanently_monitored_simulator_variables()
         logger.info(f"monitoring {len(dtdrefs)} permanent simulator variables")
