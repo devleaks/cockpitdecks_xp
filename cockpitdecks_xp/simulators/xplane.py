@@ -799,35 +799,13 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
     def simulator_variable_changed(self, data: SimulatorVariable):
         pass
 
-    def add_always_monitored_datarefs(self):
-        self.add_cockpit_datarefs()
-        self.add_simulator_variablerefs()
-
-    def add_cockpit_datarefs(self):
-        """Cockpit datarefs are always requested and used internaly by the Cockpit"""
-        dtdrefs = {}
-        for d in self.cockpit.get_variables():
-            if d.startswith(CONFIG_KW.STRING_PREFIX.value):
-                d = d.replace(CONFIG_KW.STRING_PREFIX.value, "")
-                dtdrefs[d] = self.get_variable(d, is_string=True)
-            else:
-                dtdrefs[d] = self.get_variable(d)
-            dtdrefs[d].add_listener(self.cockpit)
-        self.add_simulator_variable_to_monitor(datarefs=dtdrefs, reason="permanent datarefs (simulator)")
-        logger.info(f"monitoring {len(dtdrefs)} cockpit datarefs")
-
-    def add_simulator_variablerefs(self):
-        """Simulator datarefs are always requested and used internaly by the Simulator"""
-        dtdrefs = {}
-        for d in self.get_variables():
-            if d.startswith(CONFIG_KW.STRING_PREFIX.value):
-                d = d.replace(CONFIG_KW.STRING_PREFIX.value, "")
-                dtdrefs[d] = self.get_variable(d, is_string=True)
-            else:
-                dtdrefs[d] = self.get_variable(d)
-            dtdrefs[d].add_listener(self)
-        self.add_simulator_variable_to_monitor(dtdrefs)
-        logger.info(f"monitoring {len(dtdrefs)} simulator datarefs")
+    def add_permanently_monitored_simulator_variables(self):
+        """Add simulator variables coming from different sources (cockpit, simulator itself, etc.)
+           that are always monitored (for all aircrafts)
+        """
+        dtdrefs = self.get_permanently_monitored_simulator_variables()
+        logger.info(f"monitoring {len(dtdrefs)} permanent simulator variables")
+        self.add_simulator_variable_to_monitor(datarefs=dtdrefs, reason="permanent simulator variables")
 
     def datetime(self, zulu: bool = False, system: bool = False) -> datetime:
         """Returns the simulator date and time"""
@@ -1213,8 +1191,8 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
     def add_all_datarefs_to_monitor(self):
         if not self.connected:
             return
-        # Add always monitored drefs
-        self.add_always_monitored_datarefs()
+        # Add permanently monitored drefs
+        self.add_permanently_monitored_simulator_variables()
         # Add those to monitor
         prnt = []
         for path in self.simulator_variable_to_monitor.keys():
