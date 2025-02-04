@@ -290,6 +290,7 @@ class XPlaneInstruction(SimulatorInstruction):
                     else:
                         return Command(name=name, simulator=simulator, path=cmdargs, delay=kwargs.get("delay", 0.0), condition=kwargs.get("condition"))
                 elif type(cmdargs) in [list, tuple]:
+                    print("doing", cmdargs)
                     return SimulatorMacroInstruction(name=name, simulator=simulator, instructions=cmdargs)
         if "set_dataref" in kwargs:
             cmdargs = kwargs.get("set_dataref")
@@ -1139,7 +1140,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
             logger.debug(f"would add {self.remove_local_datarefs(simulator_variables.keys())}")
             return
         # Add those to monitor
-        super().add_simulator_variable_to_monitor(simulator_variable)
+        super().add_simulator_variables_to_monitor(simulator_variables=simulator_variables)
         prnt = []
         for d in simulator_variables.values():
             if d.is_internal:
@@ -1175,7 +1176,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
                 logger.debug(f"no need to remove {d.name}")
 
         logger.debug(f"removed {prnt}")
-        super().remove_simulator_variable_to_monitor(simulator_variables)
+        super().remove_simulator_variables_to_monitor(simulator_variables=simulator_variables)
         if MONITOR_DATAREF_USAGE:
             logger.info(f">>>>> monitoring--{len(simulator_variables)}/{len(self.datarefs)}/{self._max_monitored} {reason if reason is not None else ''}")
 
