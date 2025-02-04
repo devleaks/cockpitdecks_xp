@@ -434,7 +434,7 @@ REPLAY_DATAREFS = [
     "sim/time/sim_speed_actual",
 ]
 
-PERMANENT_SIMULATOR_DATA = DATETIME_DATAREFS + REPLAY_DATAREFS
+PERMANENT_SIMULATOR_DATA = []  # DATETIME_DATAREFS + REPLAY_DATAREFS
 
 
 # XPlaneBeacon
@@ -805,7 +805,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
         """
         dtdrefs = self.get_permanently_monitored_simulator_variables()
         logger.info(f"monitoring {len(dtdrefs)} permanent simulator variables")
-        self.add_simulator_variable_to_monitor(datarefs=dtdrefs, reason="permanent simulator variables")
+        self.add_simulator_variable_to_monitor(simulator_variable=dtdrefs, reason="permanent simulator variables")
 
     def datetime(self, zulu: bool = False, system: bool = False) -> datetime:
         """Returns the simulator date and time"""
@@ -1134,14 +1134,14 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
         self._dref_cache = {}
         logger.debug("done")
 
-    def add_simulator_variable_to_monitor(self, datarefs, reason: str = None):
+    def add_simulator_variables_to_monitor(self, simulator_variables, reason: str | None = None):
         if not self.connected:
-            logger.debug(f"would add {self.remove_local_datarefs(datarefs.keys())}")
+            logger.debug(f"would add {self.remove_local_datarefs(simulator_variable.keys())}")
             return
         # Add those to monitor
-        super().add_simulator_variable_to_monitor(datarefs)
+        super().add_simulator_variable_to_monitor(simulator_variable)
         prnt = []
-        for d in datarefs.values():
+        for d in simulator_variable.values():
             if d.is_internal:
                 logger.debug(f"local dataref {d.name} is not monitored")
                 continue
@@ -1153,15 +1153,15 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
 
         logger.log(SPAM_LEVEL, f"add_simulator_variable_to_monitor: added {prnt}")
         if MONITOR_DATAREF_USAGE:
-            logger.info(f">>>>> monitoring++{len(datarefs)}/{len(self.datarefs)}/{self._max_monitored} {reason if reason is not None else ''}")
+            logger.info(f">>>>> monitoring++{len(simulator_variable)}/{len(self.datarefs)}/{self._max_monitored} {reason if reason is not None else ''}")
 
-    def remove_simulator_variable_to_monitor(self, datarefs, reason: str = None):
+    def remove_simulator_variables_to_monitor(self, simulator_variables: dict, reason: str | None = None):
         if not self.connected and len(self.simulator_variable_to_monitor) > 0:
-            logger.debug(f"would remove {datarefs.keys()}/{self._max_monitored}")
+            logger.debug(f"would remove {simulator_variable.keys()}/{self._max_monitored}")
             return
         # Add those to monitor
         prnt = []
-        for d in datarefs.values():
+        for d in simulator_variable.values():
             if d.is_internal:
                 logger.debug(f"internal variable {d.name} is not monitored")
                 continue
@@ -1175,9 +1175,9 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
                 logger.debug(f"no need to remove {d.name}")
 
         logger.debug(f"removed {prnt}")
-        super().remove_simulator_variable_to_monitor(datarefs)
+        super().remove_simulator_variable_to_monitor(simulator_variable)
         if MONITOR_DATAREF_USAGE:
-            logger.info(f">>>>> monitoring--{len(datarefs)}/{len(self.datarefs)}/{self._max_monitored} {reason if reason is not None else ''}")
+            logger.info(f">>>>> monitoring--{len(simulator_variable)}/{len(self.datarefs)}/{self._max_monitored} {reason if reason is not None else ''}")
 
     def remove_all_datarefs(self):
         datarefs = [d for d in self.cockpit.variable_database.database.values() if type(d) is Dataref]
