@@ -12,6 +12,7 @@ import logging
 import time
 import json
 import base64
+import traceback
 
 import requests
 
@@ -22,7 +23,7 @@ from cockpitdecks import SPAM_LEVEL, CONFIG_KW, DEFAULT_FREQUENCY, MONITOR_DATAR
 from cockpitdecks.variable import InternalVariable
 from cockpitdecks.simulator import Simulator, SimulatorEvent, SimulatorInstruction, SimulatorMacroInstruction
 from cockpitdecks.simulator import SimulatorVariable, SimulatorVariableListener
-from cockpitdecks.resources.intvariables import INTERNAL_DATAREF
+from cockpitdecks.resources.intvariables import COCKPITDECKS_INTVAR
 
 logger = logging.getLogger(__name__)
 # logger.setLevel(SPAM_LEVEL)  # To see which dataref are requested
@@ -236,6 +237,7 @@ class DatarefEvent(SimulatorEvent):
             if self.sim is None:
                 logger.warning("no simulator")
                 return False
+
             # should be: dataref = self.sim.get_variable(self.dataref_path)
             dataref = self.sim.cockpit.variable_database.get(self.dataref_path)
             if dataref is None:
@@ -290,7 +292,6 @@ class XPlaneInstruction(SimulatorInstruction):
                     else:
                         return Command(name=name, simulator=simulator, path=cmdargs, delay=kwargs.get("delay", 0.0), condition=kwargs.get("condition"))
                 elif type(cmdargs) in [list, tuple]:
-                    print("doing", cmdargs)
                     return SimulatorMacroInstruction(name=name, simulator=simulator, instructions=cmdargs)
         if "set_dataref" in kwargs:
             cmdargs = kwargs.get("set_dataref")
@@ -512,7 +513,7 @@ class XPlaneBeacon:
         try:
             packet, sender = sock.recvfrom(1472)
             logger.debug(f"XPlane Beacon: {packet.hex()}")
-            self.inc(INTERNAL_DATAREF.UDP_BEACON_RCV.value)
+            self.inc(COCKPITDECKS_INTVAR.UDP_BEACON_RCV.value)
 
             # decode data
             # * Header
@@ -574,7 +575,7 @@ class XPlaneBeacon:
 
         except socket.timeout:
             logger.debug("XPlane IP not found.")
-            self.inc(INTERNAL_DATAREF.UDP_BEACON_TIMEOUT.value)
+            self.inc(COCKPITDECKS_INTVAR.UDP_BEACON_TIMEOUT.value)
             raise XPlaneIpNotFound()
         finally:
             sock.close()
@@ -615,7 +616,7 @@ class XPlaneBeacon:
                                 logger.info(f"connected")
                         logger.debug("..connected, starting dataref listener..")
                         self.start()
-                        self.inc(INTERNAL_DATAREF.STARTS.value)
+                        self.inc(COCKPITDECKS_INTVAR.STARTS.value)
                         logger.info("..dataref listener started..")
                 except XPlaneVersionNotSupported:
                     self.beacon_data = {}
@@ -720,7 +721,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
         if self._inited:
             return
 
-        self.set_internal_variable(name=INTERNAL_DATAREF.INTDREF_CONNECTION_STATUS.value, value=0, cascade=True)
+        self.set_internal_variable(name=COCKPITDECKS_INTVAR.INTDREF_CONNECTION_STATUS.value, value=0, cascade=True)
 
         # Setup socket reception for string-datarefs
         self.socket_strdref = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
@@ -885,6 +886,12 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
             logger.debug(f"{path} is local and does not need X-Plane monitoring")
             return False
 
+        ## TEMPORARY DEBUG CONTROL
+        temp_val = self.cockpit.variable_database.get(name=path)
+        if temp_val is not None and temp_val.is_string:
+            logger.error(f"{path} is a string dataref")
+            return False
+
         if not self.connected:
             if not self._already_warned > self.MAX_WARNING:
                 if self._already_warned == self.MAX_WARNING:
@@ -938,7 +945,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
         total_values = 0
         last_read_ts = datetime.now()
         total_read_time = 0.0
-        self.set_internal_variable(name=INTERNAL_DATAREF.INTDREF_CONNECTION_STATUS.value, value=3, cascade=True)
+        self.set_internal_variable(name=COCKPITDECKS_INTVAR.INTDREF_CONNECTION_STATUS.value, value=3, cascade=True)
         while self.udp_event is not None and not self.udp_event.is_set():
             if len(self.datarefs) > 0:
                 try:
@@ -946,15 +953,15 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
                     self.socket.settimeout(SOCKET_TIMEOUT)
                     data, addr = self.socket.recvfrom(1472)  # maximum bytes of an RREF answer X-Plane will send (Ethernet MTU - IP hdr - UDP hdr)
                     # Decode Packet
-                    self.set_internal_variable(name=INTERNAL_DATAREF.INTDREF_CONNECTION_STATUS.value, value=4, cascade=True)
-                    self.inc(INTERNAL_DATAREF.UDP_READS.value)
+                    self.set_internal_variable(name=COCKPITDECKS_INTVAR.INTDREF_CONNECTION_STATUS.value, value=4, cascade=True)
+                    self.inc(COCKPITDECKS_INTVAR.UDP_READS.value)
                     # Read the Header "RREF,".
                     number_of_timeouts = 0
                     total_reads = total_reads + 1
                     now = datetime.now()
                     delta = now - last_read_ts
                     self.set_internal_variable(
-                        name=INTERNAL_DATAREF.LAST_READ.value,
+                        name=COCKPITDECKS_INTVAR.LAST_READ.value,
                         value=delta.microseconds,
                         cascade=True,
                     )
@@ -967,7 +974,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
                         values = data[5:]
                         lenvalue = 8
                         numvalues = int(len(values) / lenvalue)
-                        self.inc(INTERNAL_DATAREF.VALUES.value, amount=numvalues)
+                        self.inc(COCKPITDECKS_INTVAR.VALUES.value, amount=numvalues)
                         total_values = total_values + numvalues
                         for i in range(0, numvalues):
                             singledata = data[(5 + lenvalue * i) : (5 + lenvalue * (i + 1))]
@@ -982,7 +989,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
                                     seconds_since_midnight = (now - now.replace(hour=0, minute=0, second=0, microsecond=0)).total_seconds()
                                     diff = value - seconds_since_midnight
                                     self.set_internal_variable(
-                                        name=INTERNAL_DATAREF.ZULU_DIFFERENCE.value,
+                                        name=COCKPITDECKS_INTVAR.ZULU_DIFFERENCE.value,
                                         value=diff,
                                         cascade=(total_reads % 2 == 0),
                                     )
@@ -998,7 +1005,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
                                         value=value,
                                         cascade=d in self.simulator_variable_to_monitor.keys(),
                                     )
-                                    self.inc(INTERNAL_DATAREF.UPDATE_ENQUEUED.value)
+                                    self.inc(COCKPITDECKS_INTVAR.UPDATE_ENQUEUED.value)
                                     self._dref_cache[d] = v
                             else:
                                 logger.debug(f"no dataref at index {idx}, probably no longer monitored")
@@ -1011,18 +1018,18 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
                 except TimeoutError:  # socket timeout
                     number_of_timeouts = number_of_timeouts + 1
                     logger.info(f"socket timeout received ({number_of_timeouts}/{MAX_TIMEOUT_COUNT})")  # , exc_info=True
-                    self.set_internal_variable(name=INTERNAL_DATAREF.INTDREF_CONNECTION_STATUS.value, value=2, cascade=True)
+                    self.set_internal_variable(name=COCKPITDECKS_INTVAR.INTDREF_CONNECTION_STATUS.value, value=2, cascade=True)
                     if number_of_timeouts >= MAX_TIMEOUT_COUNT:  # attemps to reconnect
                         logger.warning("too many times out, disconnecting, udp_enqueue terminated")  # ignore
                         self.beacon_data = {}
                         if self.udp_event is not None and not self.udp_event.is_set():
                             self.udp_event.set()
-                        self.set_internal_variable(name=INTERNAL_DATAREF.INTDREF_CONNECTION_STATUS.value, value=1, cascade=True)
-                        self.inc(INTERNAL_DATAREF.STOPS.value)
+                        self.set_internal_variable(name=COCKPITDECKS_INTVAR.INTDREF_CONNECTION_STATUS.value, value=1, cascade=True)
+                        self.inc(COCKPITDECKS_INTVAR.STOPS.value)
                 except:
                     logger.error(f"udp_enqueue", exc_info=True)
         self.udp_event = None
-        self.set_internal_variable(name=INTERNAL_DATAREF.INTDREF_CONNECTION_STATUS.value, value=2, cascade=True)
+        self.set_internal_variable(name=COCKPITDECKS_INTVAR.INTDREF_CONNECTION_STATUS.value, value=2, cascade=True)
         logger.info("..dataref listener terminated")
 
     def strdref_enqueue(self):
@@ -1041,7 +1048,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
             try:
                 self.socket_strdref.settimeout(self.dref_timeout)
                 data, addr = self.socket_strdref.recvfrom(1472)
-                self.set_internal_variable(name=INTERNAL_DATAREF.INTDREF_CONNECTION_STATUS.value, value=4, cascade=True)
+                self.set_internal_variable(name=COCKPITDECKS_INTVAR.INTDREF_CONNECTION_STATUS.value, value=4, cascade=True)
                 total_to = 0
                 total_reads = total_reads + 1
                 now = datetime.now()
@@ -1086,12 +1093,13 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
                 for k, v in data.items():  # simple cache mechanism
                     tot_items = tot_items + 1
                     if k not in self._strdref_cache or (k in self._strdref_cache and self._strdref_cache[k] != v):
+                        temp_val = self.cockpit.get_variable_value(name=k)
                         e = DatarefEvent(sim=self, dataref=k, value=v, cascade=True)
                         self._strdref_cache[k] = v
             except TimeoutError:  # socket timeout
                 total_to = total_to + 1
                 logger.debug(f"string dataref listener: socket timeout ({self.dref_timeout} secs.) received ({total_to})")
-                self.set_internal_variable(name=INTERNAL_DATAREF.INTDREF_CONNECTION_STATUS.value, value=2, cascade=True)
+                self.set_internal_variable(name=COCKPITDECKS_INTVAR.INTDREF_CONNECTION_STATUS.value, value=2, cascade=True)
                 self.dref_timeout = self.dref_timeout + 1  # may be we are too fast to ask, let's slow down a bit next time...
             except:
                 logger.warning(f"strdref_enqueue", exc_info=True)
@@ -1101,7 +1109,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
         # self.socket_strdref.shutdown()
         # self.socket_strdref.close()
         # logger.info("..strdref socket closed..")
-        self.set_internal_variable(name=INTERNAL_DATAREF.INTDREF_CONNECTION_STATUS.value, value=3, cascade=True)
+        self.set_internal_variable(name=COCKPITDECKS_INTVAR.INTDREF_CONNECTION_STATUS.value, value=3, cascade=True)
         logger.info("..string dataref listener terminated")
 
     # ################################
