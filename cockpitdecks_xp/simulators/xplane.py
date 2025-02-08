@@ -762,7 +762,6 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
         variable._sim = self
         self.set_rounding(variable)
         self.set_frequency(variable)
-        print("CREATE DATAREF", variable.name, variable._round)
         return variable
 
     def replay_event_factory(self, name: str, value):
