@@ -1168,7 +1168,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
 
     def remove_simulator_variables_to_monitor(self, simulator_variables: dict, reason: str | None = None):
         if not self.connected and len(self.simulator_variable_to_monitor) > 0:
-            logger.debug(f"would remove {simulator_variable.keys()}/{self._max_monitored}")
+            logger.debug(f"would remove {simulator_variables.keys()}/{self._max_monitored}")
             return
         # Add those to monitor
         prnt = []
