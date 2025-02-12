@@ -12,14 +12,13 @@ import logging
 import time
 import json
 import base64
-import traceback
 
 import requests
 
 from datetime import datetime, timedelta, timezone
 
 from cockpitdecks_xp import __version__
-from cockpitdecks import SPAM_LEVEL, CONFIG_KW, DEFAULT_FREQUENCY, MONITOR_DATAREF_USAGE
+from cockpitdecks import SPAM_LEVEL, DEFAULT_FREQUENCY, MONITOR_DATAREF_USAGE
 from cockpitdecks.variable import InternalVariable
 from cockpitdecks.simulator import Simulator, SimulatorEvent, SimulatorInstruction, SimulatorMacroInstruction
 from cockpitdecks.simulator import SimulatorVariable, SimulatorVariableListener
@@ -756,12 +755,14 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
         logger.debug(f"creating xplane instruction {name}")
         return XPlaneInstruction.new(name=name, simulator=self, **kwargs)
 
-    def variable_factory(self, name: str, is_string: bool = False) -> Dataref:
+    def variable_factory(self, name: str, is_string: bool = False, creator: str = None) -> Dataref:
         logger.debug(f"creating xplane dataref {name}")
         variable = Dataref(path=name, is_string=is_string)
         variable._sim = self
         self.set_rounding(variable)
         self.set_frequency(variable)
+        if creator is not None:
+            variable._creator = creator
         return variable
 
     def replay_event_factory(self, name: str, value):
