@@ -20,9 +20,11 @@ from datetime import datetime, timedelta, timezone
 from cockpitdecks_xp import __version__
 from cockpitdecks import SPAM_LEVEL, DEFAULT_FREQUENCY, MONITOR_DATAREF_USAGE
 from cockpitdecks.variable import InternalVariable
-from cockpitdecks.simulator import Simulator, SimulatorEvent, SimulatorInstruction, SimulatorMacroInstruction
+from cockpitdecks.instruction import MacroInstruction
+from cockpitdecks.simulator import Simulator, SimulatorEvent, SimulatorInstruction
 from cockpitdecks.simulator import SimulatorVariable, SimulatorVariableListener
 from cockpitdecks.resources.intvariables import COCKPITDECKS_INTVAR
+from ..resources.stationobs import WeatherStationObservable
 
 logger = logging.getLogger(__name__)
 # logger.setLevel(SPAM_LEVEL)  # To see which dataref are requested
@@ -272,43 +274,80 @@ NOT_A_COMMAND = [
 
 
 class XPlaneInstruction(SimulatorInstruction):
-    """An Instruction is sent to the Simulator to execute some action.
+    """An Instruction sent to the XPlane Simulator to execute some action.
 
     [description]
     """
 
-    def __init__(self, name: str, simulator: XPlane, delay: float = 0.0, condition: str | None = None, button=None) -> None:
+    def __init__(self, name: str, simulator: XPlane, delay: float = 0.0, condition: str | None = None, button: "Button" = None) -> None:
         SimulatorInstruction.__init__(self, name=name, simulator=simulator, delay=delay, condition=condition)
 
     @classmethod
-    def new(cls, name: str, simulator: XPlane, **kwargs):
-        for keyw in ["view", "command"]:
-            if keyw in kwargs:
-                cmdargs = kwargs.get(keyw)
-                if type(cmdargs) is str:
-                    if kwargs.get("longpress", False):
-                        return BeginEndCommand(name=name, simulator=simulator, path=cmdargs, delay=kwargs.get("delay", 0.0), condition=kwargs.get("condition"))
-                    else:
-                        return Command(name=name, simulator=simulator, path=cmdargs, delay=kwargs.get("delay", 0.0), condition=kwargs.get("condition"))
-                elif type(cmdargs) in [list, tuple]:
-                    return SimulatorMacroInstruction(name=name, simulator=simulator, instructions=cmdargs)
-        if "set_dataref" in kwargs:
-            cmdargs = kwargs.get("set_dataref")
-            if type(cmdargs) is str:
-                return SetDataref(
-                    name=name,
-                    simulator=simulator,
-                    path=cmdargs,
-                    value=kwargs.get("value"),
-                    formula=kwargs.get("formula"),
-                    delay=kwargs.get("delay"),
-                    condition=kwargs.get("condition"),
-                )
-        else:
-            if not kwargs.get("silence", False):
-                logger.warning(f"Instruction {name}: invalid argument {kwargs}")
-        return None
+    def new(cls, name: str, simulator: XPlane, instruction_block: dict) -> XPlaneInstruction | None:
+        def try_keyword(keyw) -> XPlaneInstruction | None:
+            command = instruction_block.get(keyw)
 
+            # list of instructions (simple or block)
+            if type(instruction_block) in [list, tuple]:
+                return MacroInstruction(name=name, performer=simulator, factory=simulator, instructions=instruction_block, delay=instruction_block.get("delay", 0.0), condition=instruction_block.get("condition"))
+
+            # single simple command to execute
+            if type(command) is str:
+                return Command(name=name, simulator=simulator, path=command)
+
+            if type(command) is dict:
+                # single instruction "block" to execute (presented as dict)
+                for keyw in ["view", "command"]:
+                    if keyw in instruction_block:
+                        cmdargs = instruction_block.get(keyw)
+                        if type(cmdargs) is str:
+                            if instruction_block.get("longpress", False):
+                                return BeginEndCommand(
+                                    name=name,
+                                    simulator=simulator,
+                                    path=cmdargs,
+                                    delay=instruction_block.get("delay", 0.0),
+                                    condition=instruction_block.get("condition"),
+                                )
+                            else:
+                                return Command(
+                                    name=name,
+                                    simulator=simulator,
+                                    path=cmdargs,
+                                    delay=instruction_block.get("delay", 0.0),
+                                    condition=instruction_block.get("condition"),
+                                )
+                if "set-dataref" in instruction_block:
+                    cmdargs = instruction_block.get("set-dataref")
+                    if type(cmdargs) is str:
+                        return SetDataref(
+                            simulator=simulator,
+                            path=cmdargs,
+                            value=instruction_block.get("value"),
+                            formula=instruction_block.get("formula"),
+                            delay=instruction_block.get("delay", 0.0),
+                            condition=instruction_block.get("condition"),
+                        )
+            logger.debug(f"could not find {keyw} in {instruction_block}")
+            return None
+
+        attempt = try_keyword("command")
+        if attempt is not None:
+            logger.debug(f"got command in {instruction_block}")
+            return attempt
+
+        attempt = try_keyword("view")
+        if attempt is not None:
+            logger.debug(f"got view in {instruction_block}")
+            return attempt
+
+        attempt = try_keyword("set-dataref")
+        if attempt is not None:
+            logger.debug(f"got set-dataref in {instruction_block}")
+            return attempt
+
+        logger.warning(f"could not find instruction in {instruction_block}")
+        return None
 
 class Command(XPlaneInstruction):
     """
@@ -316,12 +355,12 @@ class Command(XPlaneInstruction):
     A Command is the message that the simulation sofware is expecting to perform that action.
     """
 
-    def __init__(self, simulator: XPlane, path: str | None, name: str | None = None, delay: float = 0.0, condition: str | None = None):
-        XPlaneInstruction.__init__(self, name=name, simulator=simulator, delay=delay, condition=condition)
+    def __init__(self, simulator: XPlane, path: str, name: str | None = None, delay: float = 0.0, condition: str | None = None):
+        XPlaneInstruction.__init__(self, name=name if name is not None else path, simulator=simulator, delay=delay, condition=condition)
         self.path = path  # some/command
 
     def __str__(self) -> str:
-        return self.name + ":" + self.path if self.name is not None else (self.path if self.path is not None else "no command")
+        return f"{self.name} ({self.path})"
 
     def is_valid(self) -> bool:
         return self.path is not None and not self.path.lower() in NOT_A_COMMAND
@@ -337,7 +376,7 @@ class BeginEndCommand(Command):
     A Command is the message that the simulation sofware is expecting to perform that action.
     """
 
-    def __init__(self, simulator: XPlane, path: str | None, name: str | None = None, delay: float = 0.0, condition: str | None = None):
+    def __init__(self, simulator: XPlane, path: str, name: str | None = None, delay: float = 0.0, condition: str | None = None):
         Command.__init__(self, simulator=simulator, path=path, name=name, delay=0.0, condition=condition)  # force no delay for commandBegin/End
         self.is_on = False
 
@@ -435,7 +474,7 @@ REPLAY_DATAREFS = [
     "sim/time/sim_speed_actual",
 ]
 
-PERMANENT_SIMULATOR_DATA = []  # DATETIME_DATAREFS + REPLAY_DATAREFS
+PERMANENT_SIMULATOR_DATA = {}  # set(DATETIME_DATAREFS + REPLAY_DATAREFS)
 
 
 # XPlaneBeacon
@@ -714,6 +753,8 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
 
         self.socket_strdref = None
 
+        self.observables = []  # cannot create them here since XPlane does not exist yet...
+
         self.init()
 
     def init(self):
@@ -751,9 +792,9 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
     # ################################
     # Factories
     #
-    def instruction_factory(self, name, **kwargs) -> XPlaneInstruction:
+    def instruction_factory(self, name: str, instruction_block: str | dict) -> XPlaneInstruction:
         logger.debug(f"creating xplane instruction {name}")
-        return XPlaneInstruction.new(name=name, simulator=self, **kwargs)
+        return XPlaneInstruction.new(name=name, simulator=self, instruction_block=instruction_block)
 
     def variable_factory(self, name: str, is_string: bool = False, creator: str = None) -> Dataref:
         logger.debug(f"creating xplane dataref {name}")
@@ -799,15 +840,23 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
     def get_variables(self) -> set:
         """Returns the list of datarefs for which the xplane simulator wants to be notified."""
         ret = set(PERMANENT_SIMULATOR_DATA)
+        for obs in self.observables:
+            ret = ret | obs.get_variables()
         return ret
 
     def simulator_variable_changed(self, data: SimulatorVariable):
         pass
 
+    def create_local_observables(self):
+        if len(self.observables) > 0:
+            return
+        self.observables = [WeatherStationObservable(simulator=self)]
+
     def add_permanently_monitored_simulator_variables(self):
         """Add simulator variables coming from different sources (cockpit, simulator itself, etc.)
         that are always monitored (for all aircrafts)
         """
+        self.create_local_observables()
         dtdrefs = self.get_permanently_monitored_simulator_variables()
         logger.info(f"monitoring {len(dtdrefs)} permanent simulator variables")
         self.add_simulator_variables_to_monitor(simulator_variables=dtdrefs, reason="permanent simulator variables")

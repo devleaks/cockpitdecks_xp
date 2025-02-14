@@ -8,6 +8,9 @@ logging.basicConfig(level=logging.INFO)
 DATA = "data"
 
 
+# See: https://stackoverflow.com/questions/1305532/how-to-convert-a-nested-python-dict-to-object/1305663#1305663
+# Alternative
+# https://stackoverflow.com/questions/4984647/accessing-dict-keys-like-an-attribute
 class DatarefInternal(object):
     def __init__(self, d):
         for k, v in d.items():
