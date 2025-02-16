@@ -289,7 +289,14 @@ class XPlaneInstruction(SimulatorInstruction):
 
             # list of instructions (simple or block)
             if type(instruction_block) in [list, tuple]:
-                return MacroInstruction(name=name, performer=simulator, factory=simulator, instructions=instruction_block, delay=instruction_block.get("delay", 0.0), condition=instruction_block.get("condition"))
+                return MacroInstruction(
+                    name=name,
+                    performer=simulator,
+                    factory=simulator,
+                    instructions=instruction_block,
+                    delay=instruction_block.get("delay", 0.0),
+                    condition=instruction_block.get("condition"),
+                )
 
             # single simple command to execute
             if type(command) is str:
@@ -348,6 +355,7 @@ class XPlaneInstruction(SimulatorInstruction):
 
         logger.warning(f"could not find instruction in {instruction_block}")
         return None
+
 
 class Command(XPlaneInstruction):
     """
