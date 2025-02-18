@@ -13,7 +13,7 @@ from cockpitdecks.observable import Observable
 from cockpitdecks.simulator import Simulator, SimulatorVariable
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+# logger.setLevel(logging.DEBUG)
 
 
 LATITUDE = "sim/flightmodel/position/latitude"
@@ -66,11 +66,9 @@ class WeatherStationObservable(Observable):
         self._last_checked = datetime.now()
         (nearest, coords) = Station.nearest(lat=lat, lon=lon, max_coord_distance=150000)
         if nearest.icao != self._value.value():
-            logger.debug(f"changed station to {nearest.icao} ({round(lat, 6)}, {round(lon, 6)})")
+            logger.info(f"changed weather station to {nearest.icao} ({round(lat, 6)}, {round(lon, 6)})")
             self.value = nearest.icao
-            print(">>> before set", self._set_dataref.name, nearest.icao)
             self._set_dataref.update_value(new_value=nearest.icao, cascade=True)
             self._last_updated = datetime.now()
-            print(">>> after set", self._set_dataref.name, nearest.icao)
         else:
             logger.debug("checked, no change")

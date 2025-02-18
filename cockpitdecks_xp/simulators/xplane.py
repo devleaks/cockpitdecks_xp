@@ -20,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 from cockpitdecks_xp import __version__
 from cockpitdecks import SPAM_LEVEL, DEFAULT_FREQUENCY, MONITOR_DATAREF_USAGE
 from cockpitdecks.variable import InternalVariable
+from cockpitdecks.strvar import Formula
 from cockpitdecks.instruction import MacroInstruction
 from cockpitdecks.simulator import Simulator, SimulatorEvent, SimulatorInstruction
 from cockpitdecks.simulator import SimulatorVariable, SimulatorVariableListener
@@ -407,9 +408,10 @@ class SetDataref(XPlaneInstruction):
     def __init__(self, simulator: XPlane, path: str, value=None, formula: str | None = None, delay: float = 0.0, condition: str | None = None):
         XPlaneInstruction.__init__(self, name=path, simulator=simulator, delay=delay, condition=condition)
         self.path = path  # some/command
-        self.formula = None  # = formula: later, a set-dataref specific formula, different from the button one?
         self._value = value
         self._button = None
+        self._formula = formula
+        self.formula = None  # no button, no formula
 
     def __str__(self) -> str:
         return "set-dataref: " + self.name
@@ -421,6 +423,7 @@ class SetDataref(XPlaneInstruction):
     @button.setter
     def button(self, button):
         self._button = button
+        self.formula = Formula(owner=button, formula=formula)  # = formula: later, a set-dataref specific formula, different from the button one?
 
     @property
     def value(self):
@@ -430,15 +433,9 @@ class SetDataref(XPlaneInstruction):
     def value(self, value):
         self._value = value
 
-    def compute_value(self):
-        if self._button is not None:
-            return self._button.value.execute_formula(self.formula)
-        logger.warning(f"SetDataref {self.name}: no button")
-        return None
-
     def _execute(self):
         if self.formula is not None:
-            self._value = self.compute_value()
+            self.value = self.formula.value()
         self._simulator.write_dataref(dataref=self.path, value=self.value)
 
 
