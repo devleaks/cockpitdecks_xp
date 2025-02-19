@@ -293,7 +293,7 @@ class XPlaneInstruction(SimulatorInstruction):
                 return MacroInstruction(
                     name=name,
                     performer=simulator,
-                    factory=simulator,
+                    factory=simulator.cockpit,
                     instructions=instruction_block,
                     delay=instruction_block.get("delay", 0.0),
                     condition=instruction_block.get("condition"),
@@ -409,24 +409,18 @@ class SetDataref(XPlaneInstruction):
         XPlaneInstruction.__init__(self, name=path, simulator=simulator, delay=delay, condition=condition)
         self.path = path  # some/command
         self._value = value
-        self._button = None
         self._formula = formula
-        self.formula = None  # no button, no formula
+        self.formula = None
+        if self._formula is not None:
+            self.formula = Formula(owner=simulator, formula=formula)  # no button, no formula?
 
     def __str__(self) -> str:
         return "set-dataref: " + self.name
 
     @property
-    def button(self):
-        return self._button
-
-    @button.setter
-    def button(self, button):
-        self._button = button
-        self.formula = Formula(owner=button, formula=formula)  # = formula: later, a set-dataref specific formula, different from the button one?
-
-    @property
     def value(self):
+        if self.formula is not None:
+            return self.formula.value()
         return self._value
 
     @value.setter
@@ -434,8 +428,6 @@ class SetDataref(XPlaneInstruction):
         self._value = value
 
     def _execute(self):
-        if self.formula is not None:
-            self.value = self.formula.value()
         self._simulator.write_dataref(dataref=self.path, value=self.value)
 
 
