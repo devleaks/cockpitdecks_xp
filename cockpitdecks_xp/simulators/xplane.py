@@ -357,7 +357,7 @@ class XPlaneInstruction(SimulatorInstruction):
                 # Example:
                 #  set-dataref: dataref/to/set
                 #  formula: ${state:activation_count}
-                #. delay: 2
+                # . delay: 2
                 if CONFIG_KW.SET_SIM_VARIABLE.value in command_block:
                     cmdargs = command_block.get(CONFIG_KW.SET_SIM_VARIABLE.value)
                     if type(cmdargs) is str:
