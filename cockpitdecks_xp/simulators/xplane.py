@@ -18,7 +18,7 @@ import requests
 from datetime import datetime, timedelta, timezone
 
 from cockpitdecks_xp import __version__
-from cockpitdecks import SPAM_LEVEL, DEFAULT_FREQUENCY, MONITOR_DATAREF_USAGE
+from cockpitdecks import CONFIG_KW, SPAM_LEVEL, DEFAULT_FREQUENCY, MONITOR_DATAREF_USAGE
 from cockpitdecks.variable import InternalVariable
 from cockpitdecks.strvar import Formula
 from cockpitdecks.instruction import MacroInstruction
@@ -195,7 +195,7 @@ class Dataref(SimulatorVariable):
         return True
 
     def ws_update(self, ws):
-        request = {"req_id": 1, "type": "dataref_set_values", "params": {"datarefs": [{"id": self._xpindex, "value": self.current_value}]}}
+        request = {"req_id": 1, "type": "dataref_set_values", "params": {"datarefs": [{"id": self._xpindex, CONFIG_KW.VALUE.value: self.current_value}]}}
         ws.send(json.dumps(request))
 
     def auto_collect(self, simulator: Simulator):
@@ -232,7 +232,7 @@ class DatarefEvent(SimulatorEvent):
         return f"{self.sim.name}:{self.dataref_path}={self.value}:{self.timestamp}"
 
     def info(self):
-        return super().info() | {"path": self.dataref_path, "value": self.value, "cascade": self.cascade}
+        return super().info() | {"path": self.dataref_path, CONFIG_KW.VALUE.value: self.value, "cascade": self.cascade}
 
     def run(self, just_do_it: bool = False) -> bool:
         if just_do_it:
@@ -286,8 +286,6 @@ class XPlaneInstruction(SimulatorInstruction):
     @classmethod
     def new(cls, name: str, simulator: XPlane, instruction_block: dict) -> XPlaneInstruction | None:
         def try_keyword(keyw) -> XPlaneInstruction | None:
-            command = instruction_block.get(keyw)
-
             # list of instructions (simple or block)
             if type(instruction_block) in [list, tuple]:
                 return MacroInstruction(
@@ -295,64 +293,87 @@ class XPlaneInstruction(SimulatorInstruction):
                     performer=simulator,
                     factory=simulator.cockpit,
                     instructions=instruction_block,
-                    delay=instruction_block.get("delay", 0.0),
-                    condition=instruction_block.get("condition"),
+                    delay=instruction_block.get(CONFIG_KW.DELAY.value, 0.0),
+                    condition=instruction_block.get(CONFIG_KW.CONDITION.value),
                 )
 
-            # single simple command to execute
-            if type(command) is str:
-                return Command(name=name, simulator=simulator, path=command)
+            if type(instruction_block) is not dict:
+                logger.warning(f"invalid instruction block {instruction_block} ({type(instruction_block)}, should be dict)")
 
-            if type(command) is dict:
+            command_block = instruction_block.get(keyw)
+
+            # single simple command to execute
+            if type(command_block) is str:
+                # Examples:
+                #  command: map/view/show
+                #  view: AirbusFBW/PopUpSD
+                #  set-dataref: toliss/dataref/to/set
+                return Command(name=name, simulator=simulator, path=command_block)
+
+            if type(command_block) in [list, tuple]:
+                # Example:
+                #  view: [{command: AirbusFBW/PopUpSD, condition: ${AirbusFBW/PopUpStateArray[7]} not}]
+                return MacroInstruction(
+                    name=name,
+                    performer=simulator,
+                    factory=simulator.cockpit,
+                    instructions=command_block,
+                    delay=instruction_block.get(CONFIG_KW.DELAY.value, 0.0),
+                    condition=instruction_block.get(CONFIG_KW.CONDITION.value),
+                )
+
+            if type(command_block) is dict:
+                # Example:
+                #  view: {command: AirbusFBW/PopUpSD, condition: ${AirbusFBW/PopUpStateArray[7]} not}
                 # single instruction "block" to execute (presented as dict)
-                for keyw in ["view", "command"]:
-                    if keyw in instruction_block:
-                        cmdargs = instruction_block.get(keyw)
+                for local_keyw in [CONFIG_KW.VIEW.value, CONFIG_KW.COMMAND.value]:
+                    if local_keyw in command_block:
+                        cmdargs = command_block.get(local_keyw)
                         if type(cmdargs) is str:
-                            if instruction_block.get("longpress", False):
+                            if command_block.get(CONFIG_KW.LONG_PRESS.value, False):
                                 return BeginEndCommand(
                                     name=name,
                                     simulator=simulator,
                                     path=cmdargs,
-                                    delay=instruction_block.get("delay", 0.0),
-                                    condition=instruction_block.get("condition"),
+                                    delay=command_block.get(CONFIG_KW.DELAY.value, 0.0),
+                                    condition=command_block.get(CONFIG_KW.CONDITION.value),
                                 )
                             else:
                                 return Command(
                                     name=name,
                                     simulator=simulator,
                                     path=cmdargs,
-                                    delay=instruction_block.get("delay", 0.0),
-                                    condition=instruction_block.get("condition"),
+                                    delay=command_block.get(CONFIG_KW.DELAY.value, 0.0),
+                                    condition=command_block.get(CONFIG_KW.CONDITION.value),
                                 )
-                if "set-dataref" in instruction_block:
-                    cmdargs = instruction_block.get("set-dataref")
+                if CONFIG_KW.SET_SIM_VARIABLE.value in command_block:
+                    cmdargs = command_block.get(CONFIG_KW.SET_SIM_VARIABLE.value)
                     if type(cmdargs) is str:
                         return SetDataref(
                             simulator=simulator,
                             path=cmdargs,
-                            value=instruction_block.get("value"),
-                            formula=instruction_block.get("formula"),
-                            delay=instruction_block.get("delay", 0.0),
-                            condition=instruction_block.get("condition"),
+                            value=command_block.get(CONFIG_KW.VALUE.value),
+                            formula=command_block.get(CONFIG_KW.FORMULA.value),
+                            delay=command_block.get(CONFIG_KW.DELAY.value, 0.0),
+                            condition=command_block.get(CONFIG_KW.CONDITION.value),
                         )
+
+                kwlist = [CONFIG_KW.VIEW.value, CONFIG_KW.COMMAND.value, CONFIG_KW.SET_SIM_VARIABLE.value]
+                logger.debug(f"could not find {kwlist} in {command_block}")
+
             logger.debug(f"could not find {keyw} in {instruction_block}")
             return None
 
-        attempt = try_keyword("command")
-        if attempt is not None:
-            logger.debug(f"got command in {instruction_block}")
-            return attempt
-
-        attempt = try_keyword("view")
-        if attempt is not None:
-            logger.debug(f"got view in {instruction_block}")
-            return attempt
-
-        attempt = try_keyword("set-dataref")
-        if attempt is not None:
-            logger.debug(f"got set-dataref in {instruction_block}")
-            return attempt
+        # Each of the keyword below can be a single instruction or a block
+        # If we find the keyword, we build the corresponding Instruction.
+        # if we don't find the keyword, or if what the keyword points at it not
+        # a string (single instruction), an instruction block, or a list of instructions,
+        # we return None to signify "not found". Warning message also issued.
+        for keyword in [CONFIG_KW.COMMAND.value, CONFIG_KW.VIEW.value, CONFIG_KW.SET_SIM_VARIABLE.value]:
+            attempt = try_keyword(keyword)
+            if attempt is not None:
+                logger.debug(f"got {keyword} in {instruction_block}")
+                return attempt
 
         logger.warning(f"could not find instruction in {instruction_block}")
         return None
@@ -372,7 +393,7 @@ class Command(XPlaneInstruction):
         return f"{self.name} ({self.path})"
 
     def is_valid(self) -> bool:
-        return self.path is not None and not self.path.lower() in NOT_A_COMMAND
+        return self.path is not None and not self.path.lower().replace("-", "") in NOT_A_COMMAND
 
     def _execute(self):
         self.simulator.execute_command(command=self)  # does not exist...
