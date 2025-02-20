@@ -456,6 +456,7 @@ SDL_UPDATE_FREQ = 5.0  # same starting value as PI_string_datarefs_udp.FREQUENCY
 SDL_SOCKET_TIMEOUT = SDL_UPDATE_FREQ + 1.0  # should be larger or equal to PI_string_datarefs_udp.FREQUENCY
 
 XP_MIN_VERSION = 121100
+XP_MAX_VERSION = 121399
 
 # Always requested datarefs (time and simulation speed)
 #
@@ -646,8 +647,11 @@ class XPlaneBeacon:
                             if curr < XP_MIN_VERSION:
                                 logger.warning(f"X-Plane version {curr} detected, minimal version is {XP_MIN_VERSION}")
                                 logger.warning(f"Some features in Cockpitdecks may not work properly")
+                            elif curr > XP_MAX_VERSION:
+                                logger.warning(f"X-Plane version {curr} detected, maximal version is {XP_MAX_VERSION}")
+                                logger.warning(f"Some features in Cockpitdecks may not work properly")
                             else:
-                                logger.info(f"X-Plane version {curr} meets minima (>={XP_MIN_VERSION})")
+                                logger.info(f"X-Plane version meets current criteria ({XP_MIN_VERSION}<= {curr} <={XP_MAX_VERSION})")
                                 logger.info(f"connected")
                         logger.debug("..connected, starting dataref listener..")
                         self.start()
