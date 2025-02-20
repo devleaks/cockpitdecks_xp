@@ -298,7 +298,7 @@ class XPlaneInstruction(SimulatorInstruction):
                 )
 
             if type(instruction_block) is not dict:
-                logger.warning(f"invalid instruction block {instruction_block} ({type(instruction_block)}, should be dict)")
+                logger.warning(f"invalid instruction block {instruction_block} ({type(instruction_block)})")
 
             command_block = instruction_block.get(keyw)
 
@@ -311,6 +311,7 @@ class XPlaneInstruction(SimulatorInstruction):
                 return Command(name=name, simulator=simulator, path=command_block)
 
             if type(command_block) in [list, tuple]:
+                # List of instructions
                 # Example:
                 #  view: [{command: AirbusFBW/PopUpSD, condition: ${AirbusFBW/PopUpStateArray[7]} not}]
                 return MacroInstruction(
@@ -323,29 +324,40 @@ class XPlaneInstruction(SimulatorInstruction):
                 )
 
             if type(command_block) is dict:
+                # Single instruction block
                 # Example:
                 #  view: {command: AirbusFBW/PopUpSD, condition: ${AirbusFBW/PopUpStateArray[7]} not}
-                # single instruction "block" to execute (presented as dict)
                 for local_keyw in [CONFIG_KW.VIEW.value, CONFIG_KW.COMMAND.value]:
                     if local_keyw in command_block:
                         cmdargs = command_block.get(local_keyw)
                         if type(cmdargs) is str:
-                            if command_block.get(CONFIG_KW.LONG_PRESS.value, False):
-                                return BeginEndCommand(
-                                    name=name,
-                                    simulator=simulator,
-                                    path=cmdargs,
-                                    delay=command_block.get(CONFIG_KW.DELAY.value, 0.0),
-                                    condition=command_block.get(CONFIG_KW.CONDITION.value),
-                                )
-                            else:
-                                return Command(
-                                    name=name,
-                                    simulator=simulator,
-                                    path=cmdargs,
-                                    delay=command_block.get(CONFIG_KW.DELAY.value, 0.0),
-                                    condition=command_block.get(CONFIG_KW.CONDITION.value),
-                                )
+                            return Command(
+                                name=name,
+                                simulator=simulator,
+                                path=cmdargs,
+                                delay=command_block.get(CONFIG_KW.DELAY.value, 0.0),
+                                condition=command_block.get(CONFIG_KW.CONDITION.value),
+                            )
+
+                # Single instruction block
+                # Example:
+                #  long-press: airbus/fire_eng1/test
+                if CONFIG_KW.LONG_PRESS.value in command_block:
+                    cmdargs = command_block.get(CONFIG_KW.LONG_PRESS.value)
+                    if type(cmdargs) is str:
+                        return BeginEndCommand(
+                            name=name,
+                            simulator=simulator,
+                            path=cmdargs,
+                            delay=command_block.get(CONFIG_KW.DELAY.value, 0.0),
+                            condition=command_block.get(CONFIG_KW.CONDITION.value),
+                        )
+
+                # Single instruction block
+                # Example:
+                #  set-dataref: dataref/to/set
+                #  formula: ${state:activation_count}
+                #. delay: 2
                 if CONFIG_KW.SET_SIM_VARIABLE.value in command_block:
                     cmdargs = command_block.get(CONFIG_KW.SET_SIM_VARIABLE.value)
                     if type(cmdargs) is str:
