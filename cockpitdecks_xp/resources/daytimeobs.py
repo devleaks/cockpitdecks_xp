@@ -47,7 +47,6 @@ class DaytimeObservable(Observable):
         return {LATITUDE, LONGITUDE, LOCAL_DATE, ZULU_TIME_SEC}
 
     def simulator_variable_changed(self, data: SimulatorVariable):
-        print(">>> HERE HERE HERE simulator_variable_changed", data.name)
         if (datetime.now() - self._last_checked).seconds < self.check_time:
             return  # too early to change
 
@@ -78,10 +77,11 @@ class DaytimeObservable(Observable):
         sr = sun.get_sunrise_time(dt)
         ss = sun.get_sunset_time(dt)
         daytime = 1 if sr <=  dt <= ss else 0
-        logger.debug(f"at {dt}, sunrise={sr}, sunset={ss}, daytime={daytime}")
+        logger.debug(f"at {dt}, sunrise={sr}, sunset={ss}, daytime={daytime} (nb: all times in UTC)")
 
         if daytime != self._value:
             logger.info("day time" if datetime else "night time")
+            self._value = daytime
             self._set_dataref.update_value(new_value=daytime, cascade=True)
             self._last_updated = datetime.now()
         else:

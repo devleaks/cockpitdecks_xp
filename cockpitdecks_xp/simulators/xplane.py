@@ -246,9 +246,6 @@ class DatarefEvent(SimulatorEvent):
             if dataref is None:
                 logger.debug(f"dataref {self.dataref_path} not found in database")
                 return False
-
-            if dataref.name == "sim/time/zulu_time_sec":
-                print(">>> dequeued", dataref.name, dataref.listeners, self.cascade)
             try:
                 logger.debug(f"updating {dataref.name}..")
                 self.handling()
@@ -1092,7 +1089,6 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
                                 if r is not None and value is not None:
                                     v = round(value, r)
                                 if d not in self._dref_cache or (d in self._dref_cache and self._dref_cache[d] != v):
-                                    print(idx, d, v)
                                     e = DatarefEvent(
                                         sim=self,
                                         dataref=d,
