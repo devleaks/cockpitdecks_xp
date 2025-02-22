@@ -4,55 +4,54 @@
 # WEATHER_STATION_MONITORING = "weather-station"
 #
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
-from avwx import Station
+from suntime import Sun
 
-from cockpitdecks import WEATHER_STATION_MONITORING
+from cockpitdecks import DAYTIME
 from cockpitdecks.observable import Observable
 from cockpitdecks.simulator import Simulator, SimulatorVariable
 
 logger = logging.getLogger(__name__)
-# logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.DEBUG)
 
 
 LATITUDE = "sim/flightmodel/position/latitude"
 LONGITUDE = "sim/flightmodel/position/longitude"
-COORDINATES = {LATITUDE, LONGITUDE}
+LOCAL_DATE = "sim/time/local_date_days"
+ZULU_TIME_SEC = "sim/time/zulu_time_sec"
 
 
-class WeatherStationObservable(Observable):
+class DaytimeObservable(Observable):
     """Special observable that monitor the aircraft position
     and update the closest weather/airport station every check_time seconds
     if necessary.
     """
-
-    DEFAULT_STATION = "EBBR"
-
     def __init__(self, simulator: Simulator):
         wso_config = {
-            "name":  type(self).__name__,
+            "name": type(self).__name__,
             "multi-datarefs": [LATITUDE, LONGITUDE],
             "actions": [{}],  # Action is specific, in our case: (lat, lon) -> weather station icao
         }
-        super().__init__(config=wso_config, simulator=simulator)
-        self.check_time = 30  # seconds
+        Observable.__init__(self, config=wso_config, simulator=simulator)
+        self.check_time = 5  # seconds
         self._last_checked = datetime.now() - timedelta(seconds=self.check_time)
         self._last_updated = datetime.now()
         self._no_coord_warn = 0
-        self._value.update_value(new_value=self.DEFAULT_STATION)
-        self._set_dataref = simulator.get_variable(name=SimulatorVariable.internal_variable_name(path=WEATHER_STATION_MONITORING), is_string=True)
-        self._set_dataref.update_value(new_value=self.DEFAULT_STATION, cascade=True)
-        logger.debug(f"set initial station to {self.DEFAULT_STATION}")
+        self._value = 1
+        self._set_dataref = simulator.get_variable(name=SimulatorVariable.internal_variable_name(path=DAYTIME), is_string=True)
+        self._set_dataref.update_value(new_value=self._value, cascade=False)
+        logger.debug(f"set initial daytime to daytime={self._value}")
 
     def get_variables(self) -> set:
-        return COORDINATES
+        return {LATITUDE, LONGITUDE, LOCAL_DATE, ZULU_TIME_SEC}
 
     def simulator_variable_changed(self, data: SimulatorVariable):
+        print(">>> HERE HERE HERE simulator_variable_changed", data.name)
         if (datetime.now() - self._last_checked).seconds < self.check_time:
             return  # too early to change
 
-        if data.name not in COORDINATES:
+        if data.name not in self.get_variables():
             return  # not for me, should never happen
 
         lat = self.sim.get_simulator_variable_value(LATITUDE)
@@ -63,12 +62,27 @@ class WeatherStationObservable(Observable):
             self._no_coord_warn = self._no_coord_warn + 1
             return
 
+        days = self.sim.get_simulator_variable_value(LOCAL_DATE)
+        if days is None:
+            logger.warning("no days since new year")
+            return
+
+        secs = self.sim.get_simulator_variable_value(ZULU_TIME_SEC)
+        if secs is None:
+            logger.warning("no seconds since midnight")
+            return
+
         self._last_checked = datetime.now()
-        (nearest, coords) = Station.nearest(lat=lat, lon=lon, max_coord_distance=150000)
-        if nearest.icao != self._value.value():
-            logger.info(f"changed weather station to {nearest.icao} ({round(lat, 6)}, {round(lon, 6)})")
-            self.value = nearest.icao
-            self._set_dataref.update_value(new_value=nearest.icao, cascade=True)
+        sun = Sun(lat, lon)  # we have a location
+        dt = datetime(datetime.now().year, 1, 1, tzinfo=timezone.utc) + timedelta(days=days) + timedelta(seconds=secs)
+        sr = sun.get_sunrise_time(dt)
+        ss = sun.get_sunset_time(dt)
+        daytime = 1 if sr <=  dt <= ss else 0
+        logger.debug(f"at {dt}, sunrise={sr}, sunset={ss}, daytime={daytime}")
+
+        if daytime != self._value:
+            logger.info("day time" if datetime else "night time")
+            self._set_dataref.update_value(new_value=daytime, cascade=True)
             self._last_updated = datetime.now()
         else:
             logger.debug("checked, no change")

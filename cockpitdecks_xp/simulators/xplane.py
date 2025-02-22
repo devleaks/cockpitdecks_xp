@@ -26,6 +26,7 @@ from cockpitdecks.simulator import Simulator, SimulatorEvent, SimulatorInstructi
 from cockpitdecks.simulator import SimulatorVariable, SimulatorVariableListener
 from cockpitdecks.resources.intvariables import COCKPITDECKS_INTVAR
 from ..resources.stationobs import WeatherStationObservable
+from ..resources.daytimeobs import DaytimeObservable
 
 logger = logging.getLogger(__name__)
 # logger.setLevel(SPAM_LEVEL)  # To see which dataref are requested
@@ -246,6 +247,8 @@ class DatarefEvent(SimulatorEvent):
                 logger.debug(f"dataref {self.dataref_path} not found in database")
                 return False
 
+            if dataref.name == "sim/time/zulu_time_sec":
+                print(">>> dequeued", dataref.name, dataref.listeners, self.cascade)
             try:
                 logger.debug(f"updating {dataref.name}..")
                 self.handling()
@@ -493,10 +496,11 @@ XP_MAX_VERSION = 121399
 
 # Always requested datarefs (time and simulation speed)
 #
+ZULU_TIME_SEC = "sim/time/zulu_time_sec"
 DATETIME_DATAREFS = [
     "sim/time/local_date_days",
     "sim/time/local_time_sec",
-    "sim/time/zulu_time_sec",
+    ZULU_TIME_SEC,
     "sim/time/use_system_time",
 ]
 REPLAY_DATAREFS = [
@@ -884,7 +888,10 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
     def create_local_observables(self):
         if len(self.observables) > 0:
             return
-        self.observables = [WeatherStationObservable(simulator=self)]
+        self.observables = [
+            WeatherStationObservable(simulator=self),
+            DaytimeObservable(simulator=self)
+        ]
 
     def add_permanently_monitored_simulator_variables(self):
         """Add simulator variables coming from different sources (cockpit, simulator itself, etc.)
@@ -897,7 +904,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
 
     def datetime(self, zulu: bool = False, system: bool = False) -> datetime:
         """Returns the simulator date and time"""
-        if not self.cockpit.variable_database.exists(DATETIME_DATAREFS[0]):  # hack, means dref not created yet
+        if not self.cockpit.variable_database.exists(DATETIME_DATAREFS[0]):  # !! hack, means dref not created yet
             return super().datetime(zulu=zulu, system=system)
         now = datetime.now().astimezone()
         days = self.get_simulator_variable_value("sim/time/local_date_days")
@@ -1070,7 +1077,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
                             if d is not None:
                                 if value < 0.0 and value > -0.001:  # convert -0.0 values to positive 0.0
                                     value = 0.0
-                                if d == DATETIME_DATAREFS[2]:  # zulu secs
+                                if d == ZULU_TIME_SEC:
                                     now = datetime.now().astimezone(tz=timezone.utc)
                                     seconds_since_midnight = (now - now.replace(hour=0, minute=0, second=0, microsecond=0)).total_seconds()
                                     diff = value - seconds_since_midnight
@@ -1085,6 +1092,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
                                 if r is not None and value is not None:
                                     v = round(value, r)
                                 if d not in self._dref_cache or (d in self._dref_cache and self._dref_cache[d] != v):
+                                    print(idx, d, v)
                                     e = DatarefEvent(
                                         sim=self,
                                         dataref=d,
