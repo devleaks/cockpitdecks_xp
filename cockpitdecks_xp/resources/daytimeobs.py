@@ -80,9 +80,9 @@ class DaytimeObservable(Observable):
         logger.debug(f"at {dt}, sunrise={sr}, sunset={ss}, daytime={daytime} (nb: all times in UTC)")
 
         if daytime != self._value:
-            logger.info("day time" if datetime else "night time")
             self._value = daytime
             self._set_dataref.update_value(new_value=daytime, cascade=True)
             self._last_updated = datetime.now()
+            logger.info("day time" if daytime == 1 else "night time")
         else:
             logger.debug("checked, no change")
