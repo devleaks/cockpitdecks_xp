@@ -885,10 +885,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
     def create_local_observables(self):
         if len(self.observables) > 0:
             return
-        self.observables = [
-            WeatherStationObservable(simulator=self),
-            DaytimeObservable(simulator=self)
-        ]
+        self.observables = [WeatherStationObservable(simulator=self), DaytimeObservable(simulator=self)]
 
     def add_permanently_monitored_simulator_variables(self):
         """Add simulator variables coming from different sources (cockpit, simulator itself, etc.)

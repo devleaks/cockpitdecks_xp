@@ -31,7 +31,7 @@ class WeatherStationObservable(Observable):
 
     def __init__(self, simulator: Simulator):
         wso_config = {
-            "name":  type(self).__name__,
+            "name": type(self).__name__,
             "multi-datarefs": [LATITUDE, LONGITUDE],
             "actions": [{}],  # Action is specific, in our case: (lat, lon) -> weather station icao
         }

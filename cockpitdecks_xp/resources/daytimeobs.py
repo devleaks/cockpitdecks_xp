@@ -27,6 +27,7 @@ class DaytimeObservable(Observable):
     and update the closest weather/airport station every check_time seconds
     if necessary.
     """
+
     def __init__(self, simulator: Simulator):
         wso_config = {
             "name": type(self).__name__,
@@ -76,7 +77,7 @@ class DaytimeObservable(Observable):
         dt = datetime(datetime.now().year, 1, 1, tzinfo=timezone.utc) + timedelta(days=days) + timedelta(seconds=secs)
         sr = sun.get_sunrise_time(dt)
         ss = sun.get_sunset_time(dt)
-        daytime = 1 if sr <=  dt <= ss else 0
+        daytime = 1 if sr <= dt <= ss else 0
         logger.debug(f"at {dt}, sunrise={sr}, sunset={ss}, daytime={daytime} (nb: all times in UTC)")
 
         if daytime != self._value:
