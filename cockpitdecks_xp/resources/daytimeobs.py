@@ -35,7 +35,7 @@ class DaytimeObservable(Observable):
             "actions": [{}],  # Action is specific, in our case: (lat, lon) -> weather station icao
         }
         Observable.__init__(self, config=wso_config, simulator=simulator)
-        self.check_time = 5  # seconds
+        self.check_time = 10 * 60  # seconds
         self._last_checked = datetime.now() - timedelta(seconds=self.check_time)
         self._last_updated = datetime.now()
         self._no_coord_warn = 0
