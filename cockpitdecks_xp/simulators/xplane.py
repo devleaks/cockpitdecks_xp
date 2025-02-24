@@ -818,7 +818,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
         if not self._inited:
             return
         for i in range(len(self.datarefs)):
-            self.add_dataref_to_monitor(next(iter(self.datarefs.values())), freq=0)
+            self.remove_dataref_from_monitor(next(iter(self.datarefs.values())))
         self.disconnect()
 
     def get_version(self) -> list:
@@ -1224,7 +1224,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
         if not self.connected:
             return
         for i in range(len(self.datarefs)):
-            self.add_dataref_to_monitor(next(iter(self.datarefs.values())), freq=0)
+            self.remove_dataref_from_monitor(next(iter(self.datarefs.values())))
         super().clean_simulator_variable_to_monitor()
         self._strdref_cache = {}
         self._dref_cache = {}
@@ -1263,7 +1263,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
                 continue
             if d.name in self.simulator_variable_to_monitor.keys():
                 if self.simulator_variable_to_monitor[d.name] == 1:  # will be decreased by 1 in super().remove_simulator_variable_to_monitor()
-                    if self.add_dataref_to_monitor(d.name, freq=0):
+                    if self.remove_dataref_from_monitor(d.name):
                         prnt.append(d.name)
                 else:
                     logger.debug(f"{d.name} monitored {self.simulator_variable_to_monitor[d.name]} times")
