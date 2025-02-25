@@ -264,7 +264,7 @@ class XPRealWeatherData(WeatherData):
             WEATHER_DATAFEFS = DATAREF_LOCATION
 
         if position_only:
-            logger.info(f"collecting position datarefs..")
+            logger.info("collecting position datarefs..")
         else:
             logger.info(f"collecting {self.xp_real_weather_type} weather datarefs..")
         weather_datarefs = {}

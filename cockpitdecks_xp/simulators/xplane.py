@@ -974,10 +974,13 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneBeacon):
             return False
 
         ## TEMPORARY DEBUG CONTROL
-        temp_val = self.cockpit.variable_database.get(name=path)
-        if temp_val is not None and temp_val.is_string:
-            logger.error(f"{path} is a string dataref")
+        variable = self.cockpit.variable_database.get(name=path)
+        if variable is not None and variable.is_string:
+            logger.error(f"{path} is a string dataref, not requested by udp")
             return False
+
+        if variable is None:
+            logger.warning(f"{path} variable not found")
 
         if not self.connected:
             if not self._already_warned > self.MAX_WARNING:
