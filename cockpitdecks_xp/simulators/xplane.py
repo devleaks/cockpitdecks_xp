@@ -7,6 +7,7 @@ import threading
 import logging
 import json
 import base64
+import traceback
 
 import requests
 from simple_websocket import Client, ConnectionClosed
@@ -14,7 +15,7 @@ from simple_websocket import Client, ConnectionClosed
 from datetime import datetime, timedelta, timezone
 
 from cockpitdecks_xp import __version__
-from cockpitdecks import CONFIG_KW, SPAM_LEVEL, MONITOR_DATAREF_USAGE
+from cockpitdecks import CONFIG_KW, ENVIRON_KW, SPAM_LEVEL, MONITOR_DATAREF_USAGE
 from cockpitdecks.strvar import Formula
 from cockpitdecks.instruction import MacroInstruction
 
@@ -38,9 +39,9 @@ logger = logging.getLogger(__name__)
 RECONNECT_TIMEOUT = 10  # seconds, times between attempts to reconnect to X-Plane when not connected
 RECEIVE_TIMEOUT = 5  # seconds, assumes no awser if no message recevied withing that timeout
 
-XP_MIN_VERSION = 121100
-XP_MAX_VERSION = 121399
-XP_MIN_VERSION_STR = "12.1.1"
+XP_MIN_VERSION = 121400
+XP_MIN_VERSION_STR = "12.1.4"
+XP_MAX_VERSION = 121499
 XP_MAX_VERSION_STR = "12.1.4"
 
 # #############################################
@@ -70,7 +71,9 @@ PERMANENT_SIMULATOR_DATA = {}  # set(DATETIME_DATAREFS + REPLAY_DATAREFS)
 
 # REST API model keywords
 
+REST_COMMANDS = "commands"
 REST_DATA = "data"
+REST_DATAREFS = "datarefs"
 REST_DURATION = "duration"
 REST_IDENT = "id"
 REST_INDEX = "index"
@@ -83,7 +86,7 @@ REST_SUCCESS = "success"
 REST_TYPE = "type"
 REST_VALUE = "value"
 REST_VALUE_TYPE = "value_type"
-
+INDICES = "_index_list"
 
 # Dataref object
 class XPRESTObject:
@@ -134,6 +137,9 @@ class Dataref(SimulatorVariable, XPRESTObject):
         SimulatorVariable.__init__(self, name=path, simulator=simulator, data_type="string" if is_string else "float")
         XPRESTObject.__init__(self, path=path)
 
+        if SimulatorVariable.is_state_variable(path):
+            traceback.print_stack()
+
         self.index = 0  # 4
         if "[" in path:  # sim/some/values[4]
             self.root_name = self.name[: self.name.find("[")]
@@ -156,7 +162,7 @@ class Dataref(SimulatorVariable, XPRESTObject):
         data = response.json()
         logger.debug(f"result: {data}")
         if REST_DATA in data and type(data[REST_DATA]) in [bytes, str]:
-            return base64.b64decode(data[REST_DATA])[:-1].decode("ascii").replace("\u0000", "")
+            return base64.b64decode(data[REST_DATA]).decode("ascii").replace("\u0000", "")
         return data[REST_DATA]
 
     def rest_write(self) -> bool:
@@ -265,6 +271,8 @@ class XPlaneInstruction(SimulatorInstruction, XPRESTObject):
 
     @classmethod
     def new(cls, name: str, simulator: XPlane, instruction_block: dict) -> XPlaneInstruction | None:
+        INSTRUCTIONS = [CONFIG_KW.BEGIN_END.value, CONFIG_KW.SET_SIM_VARIABLE.value, CONFIG_KW.COMMAND.value, CONFIG_KW.VIEW.value]
+
         def try_keyword(keyw) -> XPlaneInstruction | None:
             # list of instructions (simple or block)
             if type(instruction_block) in [list, tuple]:
@@ -285,10 +293,50 @@ class XPlaneInstruction(SimulatorInstruction, XPRESTObject):
             # single simple command to execute
             if type(command_block) is str:
                 # Examples:
-                #  command: map/view/show
+                #  command: AirbusFWB/SpeedSelPush
+                #  long-press: AirbusFWB/SpeedSelPull
                 #  view: AirbusFBW/PopUpSD
                 #  set-dataref: toliss/dataref/to/set
-                return Command(name=name, simulator=simulator, path=command_block)
+                #  begin-end: sim/apu/fire_test
+                match keyw:
+
+                    case CONFIG_KW.BEGIN_END.value:
+                        return BeginEndCommand(
+                                name=name,
+                                simulator=simulator,
+                                path=command_block)
+
+                    case CONFIG_KW.SET_SIM_VARIABLE.value:
+                        return SetDataref(
+                            name=name,
+                            simulator=simulator,
+                            path=command_block,
+                        )
+
+                    case CONFIG_KW.VIEW.value:
+                        return Command(
+                            name=name,
+                            simulator=simulator,
+                            path=command_block,
+                        )
+
+                    case CONFIG_KW.COMMAND.value:
+                        return Command(
+                            name=name,
+                            simulator=simulator,
+                            path=command_block,
+                        )
+
+                    case CONFIG_KW.LONG_PRESS.value:
+                        return Command(
+                            name=name,
+                            simulator=simulator,
+                            path=command_block,
+                        )
+
+                    case _:
+                        logger.warning(f"no instruction for {keyw}")
+                        return None
 
             if type(command_block) in [list, tuple]:
                 # List of instructions
@@ -306,24 +354,9 @@ class XPlaneInstruction(SimulatorInstruction, XPRESTObject):
             if type(command_block) is dict:
                 # Single instruction block
                 # Example:
-                #  view: {command: AirbusFBW/PopUpSD, condition: ${AirbusFBW/PopUpStateArray[7]} not}
-                for local_keyw in [CONFIG_KW.VIEW.value, CONFIG_KW.COMMAND.value]:
-                    if local_keyw in command_block:
-                        cmdargs = command_block.get(local_keyw)
-                        if type(cmdargs) is str:
-                            return Command(
-                                name=name,
-                                simulator=simulator,
-                                path=cmdargs,
-                                delay=command_block.get(CONFIG_KW.DELAY.value, 0.0),
-                                condition=command_block.get(CONFIG_KW.CONDITION.value),
-                            )
-
-                # Single instruction block
-                # Example:
-                #  long-press: airbus/fire_eng1/test
-                if CONFIG_KW.LONG_PRESS.value in command_block:
-                    cmdargs = command_block.get(CONFIG_KW.LONG_PRESS.value)
+                #  begin-end: airbus/fire_eng1/test
+                if CONFIG_KW.BEGIN_END.value in command_block:
+                    cmdargs = command_block.get(CONFIG_KW.BEGIN_END.value)
                     if type(cmdargs) is str:
                         return BeginEndCommand(
                             name=name,
@@ -337,7 +370,7 @@ class XPlaneInstruction(SimulatorInstruction, XPRESTObject):
                 # Example:
                 #  set-dataref: dataref/to/set
                 #  formula: ${state:activation_count}
-                # . delay: 2
+                #  delay: 2
                 if CONFIG_KW.SET_SIM_VARIABLE.value in command_block:
                     cmdargs = command_block.get(CONFIG_KW.SET_SIM_VARIABLE.value)
                     if type(cmdargs) is str:
@@ -350,6 +383,21 @@ class XPlaneInstruction(SimulatorInstruction, XPRESTObject):
                             condition=command_block.get(CONFIG_KW.CONDITION.value),
                         )
 
+                # Single instruction block
+                # Example:
+                #  view: {command: AirbusFBW/PopUpSD, condition: ${AirbusFBW/PopUpStateArray[7]} not}
+                for local_keyw in [CONFIG_KW.VIEW.value, CONFIG_KW.COMMAND.value, CONFIG_KW.LONG_PRESS.value]:
+                    if local_keyw in command_block:
+                        cmdargs = command_block.get(local_keyw)
+                        if type(cmdargs) is str:
+                            return Command(
+                                name=name,
+                                simulator=simulator,
+                                path=cmdargs,
+                                delay=command_block.get(CONFIG_KW.DELAY.value, 0.0),
+                                condition=command_block.get(CONFIG_KW.CONDITION.value),
+                            )
+
                 kwlist = [CONFIG_KW.VIEW.value, CONFIG_KW.COMMAND.value, CONFIG_KW.SET_SIM_VARIABLE.value]
                 logger.debug(f"could not find {kwlist} in {command_block}")
 
@@ -361,7 +409,7 @@ class XPlaneInstruction(SimulatorInstruction, XPRESTObject):
         # if we don't find the keyword, or if what the keyword points at it not
         # a string (single instruction), an instruction block, or a list of instructions,
         # we return None to signify "not found". Warning message also issued.
-        for keyword in [CONFIG_KW.COMMAND.value, CONFIG_KW.VIEW.value, CONFIG_KW.SET_SIM_VARIABLE.value]:
+        for keyword in [CONFIG_KW.BEGIN_END.value, CONFIG_KW.SET_SIM_VARIABLE.value, CONFIG_KW.COMMAND.value, CONFIG_KW.VIEW.value]:
             attempt = try_keyword(keyword)
             if attempt is not None:
                 # logger.debug(f"got {keyword} in {instruction_block}")
@@ -465,7 +513,6 @@ class SetDataref(XPlaneInstruction):
         self.formula = None
         if self._formula is not None:
             self.formula = Formula(owner=simulator, formula=formula)  # no button, no formula?
-        print(">>>>>>>>", self.path)
 
     def __str__(self) -> str:
         return "set-dataref: " + self.name
@@ -677,15 +724,6 @@ class XPlaneREST:
 # #############################################
 # WEBSOCKET API
 #
-class ReqNumber:
-    def __init__(self) -> None:
-        self.req_number = 0
-
-    def next(self) -> int:
-        self.req_number = self.req_number + 1
-        return self.req_number
-
-
 class XPlaneWebSocket(XPlaneREST):
     """
     Get data from XPlane via network.
@@ -701,12 +739,16 @@ class XPlaneWebSocket(XPlaneREST):
         self.local_ip = socket.gethostbyname(hostname)
 
         self.ws = None  # None = no connection
-        self.curr_reqnr = ReqNumber()
+        self.req_number = 0
         self._requests = {}
 
         self.should_not_connect = None  # threading.Event(
         self.connect_thread = None  # threading.Thread()
         self._already_warned = 0
+
+    def next_req(self):
+        self.req_number = self.req_number + 1
+        return self.req_number
 
     @property
     def connected(self) -> bool:
@@ -851,7 +893,7 @@ class XPlaneWebSocket(XPlaneREST):
     def send(self, payload: dict) -> int:
         if self.connected:
             if payload is not None and len(payload) > 0:
-                req_id = self.curr_reqnr.next()
+                req_id = self.next_req()
                 payload[REST_REQID] = req_id
                 self._requests[req_id] = None
                 self.ws.send(json.dumps(payload))
@@ -862,77 +904,123 @@ class XPlaneWebSocket(XPlaneREST):
         logger.warning("not connected")
         return -1
 
+    # Dataref operations
+    #
+    # It is not possible get the the value of a dataref just once
+    # through web service.
+    #
     # def get_dataref_value(self, path, on: bool = True) -> int:
     #     dref = self.get_dataref_info_by_name(path)
     #     if dref is not None:
     #         action = "dataref_subscribe_values" if on else "dataref_unsubscribe_values"
-    #         return self.send({"type": action, "params": {"datarefs": [{"id": dref.ident}]}})
+    #         return self.send({"type": action, "params": {REST_DATAREFS: [{"id": dref.ident}]}})
     #     logger.warning(f"dataref {path} not found in X-Plane datarefs database")
     #     return -1
+
+    def split_dataref_path(self, path):
+        name = path
+        index = -1
+        split = "[" in path and "]" in path
+        if split:  # sim/some/values[4]
+            name = path[: path.find("[")]
+            index = int(path[path.find("[") + 1 : path.find("]")])  # 4
+        dref = self.get_dataref_info_by_name(name)
+        return split, dref, name, index
+
+    def append_index(self, dref, i):
+        if INDICES not in dref:
+            dref[INDICES] = set()
+        dref[INDICES].add(i)
+
+    def remove_index(self, dref, i):
+        if INDICES not in dref:
+            logger.warning(f"{dref} has no index list")
+            return
+        dref[INDICES].remove(i)
 
     def set_dataref_value(self, path, value) -> int:
         if value is None:
             logger.warning(f"dataref {path} has no value to set")
             return -1
-        name = path
-        index = -1
-        if "[" in path and "]" in path:  # sim/some/values[4]
-            name = path[: path.find("[")]
-            index = int(path[path.find("[") + 1 : path.find("]")])  # 4
-        dref = self.get_dataref_info_by_name(name)
-        if dref is not None:
-            if "[" in path and "]" in path:  # sim/some/values[4]
-                return self.send({
-                    REST_TYPE: "dataref_set_values",
-                    REST_PARAMS: {
-                        "datarefs": [{
-                            REST_IDENT: dref[REST_IDENT],
-                            REST_INDEX: index,
-                            REST_VALUE: value
-                        }]
-                    }
-                })
-            return self.send({REST_TYPE: "dataref_set_values", REST_PARAMS: {"datarefs": [{REST_IDENT: dref[REST_IDENT], REST_VALUE: value}]}})
-        logger.warning(f"dataref {path} not found in X-Plane datarefs database")
-        return -1
+        split, dref, name, index = self.split_dataref_path(path)
+        if dref is None:
+            logger.warning(f"dataref {path} not found in X-Plane datarefs database")
+            return -1
+        payload = {
+            REST_TYPE: "dataref_set_values",
+            REST_PARAMS: {
+                REST_DATAREFS: [{
+                    REST_IDENT: dref[REST_IDENT],
+                    REST_VALUE: value
+                }]
+            }
+        }
+        if split:
+            payload[REST_PARAMS][REST_DATAREFS][0][REST_INDEX] = index
+        return self.send(payload)
 
-    def register_dataref_value_event(self, path, on: bool = True) -> int:
-        dref = self.get_dataref_info_by_name(path)
-        if dref is not None:
-            action = "dataref_subscribe_values" if on else "dataref_unsubscribe_values"
-            return self.send({REST_TYPE: action, REST_PARAMS: {"datarefs": [{REST_IDENT: dref[REST_IDENT]}]}})
-        logger.warning(f"dataref {path} not found in X-Plane datarefs database")
-        return -1
+    def register_dataref_value_event(self, path: str, on: bool = True) -> int:
+        split, dref, name, index = self.split_dataref_path(path)
+        if dref is None:
+            logger.warning(f"dataref {path} not found in X-Plane datarefs database")
+            return -1
+        payload = {
+            REST_TYPE: "dataref_subscribe_values" if on else "dataref_unsubscribe_values",
+            REST_PARAMS: {
+                REST_DATAREFS: [{
+                    REST_IDENT: dref[REST_IDENT],
+                    REST_VALUE: value
+                }]
+            }
+        }
+        if split:
+            payload[REST_PARAMS][REST_DATAREFS][0][REST_INDEX] = index
+            if on:
+                self.append_index(dref, index)
+            else:
+                self.remove_index(dref, index)
+        return self.send(payload)
 
     def register_bulk_dataref_value_event(self, paths, on: bool = True) -> int:
         drefs = []
         for path in paths:
-            dref = self.get_dataref_info_by_name(path)
-            if dref is not None:
-                drefs.append({REST_IDENT: dref[REST_IDENT]})
-            else:
+            split, dref, name, index = self.split_dataref_path(path)
+            if dref is None:
                 logger.warning(f"dataref {path} not found in X-Plane datarefs database")
+                continue
+            if split:
+                drefs.append({REST_IDENT: dref[REST_IDENT], REST_INDEX: index})
+                self.append_index(dref, index)
+                if on:
+                    self.append_index(dref, index)
+                else:
+                    self.remove_index(dref, index)
+            else:
+                drefs.append({REST_IDENT: dref[REST_IDENT]})
+
         if len(drefs) > 0:
             action = "dataref_subscribe_values" if on else "dataref_unsubscribe_values"
-            return self.send({REST_TYPE: action, REST_PARAMS: {"datarefs": drefs}})
+            return self.send({REST_TYPE: action, REST_PARAMS: {REST_DATAREFS: drefs}})
         logger.warning(f"no bulk datarefs to register")
         return -1
 
-    def register_command_event(self, path, on: bool = True) -> int:
+    # Command operations
+    #
+    def register_command_event(self, path: str, on: bool = True) -> int:
         cmd = self.get_command_info_by_name(path)
         if cmd is not None:
             action = "command_subscribe_is_active" if on else "command_unsubscribe_is_active"
-            return self.send({REST_TYPE: action, REST_PARAMS: {"commands": [{REST_IDENT: cmd[REST_IDENT]}]}})
+            return self.send({REST_TYPE: action, REST_PARAMS: {REST_COMMANDS: [{REST_IDENT: cmd[REST_IDENT]}]}})
         logger.warning(f"command {path} not found in X-Plane commands database")
         return -1
 
-    def execute_ws_command(self, path, duration: float = 0.0) -> int:
+    def execute_ws_command(self, path: str, duration: float = 0.0) -> int:
         cmd = self.get_command_info_by_name(path)
         if cmd is not None:
             return self.send({
                 REST_TYPE: "command_set_is_active",
                 REST_PARAMS: {
-                    "commands": [
+                    REST_COMMANDS: [
                         {REST_IDENT: cmd[REST_IDENT], REST_DURATION: duration, REST_ISACTIVE: True}
                     ]
                 }
@@ -940,13 +1028,13 @@ class XPlaneWebSocket(XPlaneREST):
         logger.warning(f"command {path} not found in X-Plane commands database")
         return -1
 
-    def execute_ws_long_command(self, path, active: bool) -> int:
+    def execute_ws_long_command(self, path: str, active: bool) -> int:
         cmd = self.get_command_info_by_name(path)
         if cmd is not None:
             return self.send({
                 REST_TYPE: "command_set_is_active",
                 REST_PARAMS: {
-                    "commands": [
+                    REST_COMMANDS: [
                         {REST_IDENT: cmd[REST_IDENT], REST_ISACTIVE: active}
                     ]
                 }
@@ -989,10 +1077,11 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         self._dref_cache = {}
         self.observables = []  # cannot create them here since XPlane does not exist yet...
 
-        self.xp_home = environ.get("XP_HOME")
-        self.api_host = environ.get("API_HOST")
-        self.api_port = environ.get("API_PORT")
-        self.api_path = environ.get("API_PATH")
+        self.xp_home = environ.get(ENVIRON_KW.SIMULATOR_HOME.value)
+        self.api_host = environ.get(ENVIRON_KW.API_HOST.value)
+        self.api_port = environ.get(ENVIRON_KW.API_PORT.value)
+        self.api_path = environ.get(ENVIRON_KW.API_PATH.value)
+        self.api_version = environ.get(ENVIRON_KW.API_VERSION.value)
 
         Simulator.__init__(self, cockpit=cockpit, environ=environ)
         XPlaneWebSocket.__init__(self, host=self.api_host[0], port=self.api_host[1])
@@ -1107,10 +1196,10 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
     def ws_receiver(self):
         """Read and decode websocket messages and enqueue change events
         """
-        def dref_round(path, value):
-            r = self.get_rounding(simulator_variable_name=d)
-            v = round(value, r) if r is not None and value is not None else value
-            return 0.0 if v < 0.0 and v > -0.001 else v
+        def dref_round(local_path: str, local_value):
+            local_r = self.get_rounding(simulator_variable_name=local_path)
+            local_v = round(local_value, local_r) if local_r is not None and local_value is not None else local_value
+            return 0.0 if local_v < 0.0 and local_v > -0.001 else local_v
 
         logger.debug("starting websocket listener..")
         total_reads = 0
@@ -1179,24 +1268,42 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
                                             cascade=(total_reads % 2 == 0),
                                         )
                                         print_zulu = print_zulu + 1
-                                    v = value
-                                    send_raw = True
-                                    if dref.get(REST_VALUE_TYPE) is not None and dref[REST_VALUE_TYPE] in ["string", "data"] and type(value) in [bytes, str]:  # float, double, int, int_array, float_array, data
-                                        v = base64.b64decode(value)[:-1].decode("ascii").replace("\u0000", "")
-                                        send_raw = False
-                                    elif type(v) in [int, float]:
-                                        v = dref_round(path=d, value=value)
-                                    if d not in self._dref_cache or self._dref_cache[d] != v:  # cached rounded value
-                                        if d != ZULU_TIME_SEC or print_zulu % 120 == 0:
-                                            print("DREF", d, self._dref_cache.get(d), " -> ", v)
-                                        e = DatarefEvent(
-                                            sim=self,
-                                            dataref=d,
-                                            value=value if send_raw else v,  # send raw value if possible
-                                            cascade=d in self.simulator_variable_to_monitor.keys(),
-                                        )
-                                        self.inc(COCKPITDECKS_INTVAR.UPDATE_ENQUEUED.value)
-                                        self._dref_cache[d] = v
+                                    if dref.get(REST_VALUE_TYPE) is not None and dref[REST_VALUE_TYPE] in ["int_array", "float_array"]:
+                                        # we must check each individual value...
+                                        if INDICES not in dref or len(value) != len(dref[INDICES]):
+                                            logger.warning(f"dataref array {d} size mismatch ({len(value)}/{len(dref[INDICES])})")
+                                        for v1, idx, cnt in zip(value, dref[INDICES], range(len(value))):
+                                            d1 = f"{d}[{idx}]"
+                                            v = dref_round(local_path=d1, local_value=v1)
+                                            if d1 not in self._dref_cache or self._dref_cache[d1] != v:  # cached rounded value
+                                                print("DREF ARRAY", cnt, d, idx, self._dref_cache.get(d1), " -> ", v)
+                                                e = DatarefEvent(
+                                                    sim=self,
+                                                    dataref=d1,
+                                                    value=v1,
+                                                    cascade=d in self.simulator_variable_to_monitor.keys(),
+                                                )
+                                                self.inc(COCKPITDECKS_INTVAR.UPDATE_ENQUEUED.value)
+                                                self._dref_cache[d1] = v
+                                    else:
+                                        v = value
+                                        send_raw = True
+                                        if dref.get(REST_VALUE_TYPE) is not None and dref[REST_VALUE_TYPE] == "data" and type(value) in [bytes, str]:  # float, double, int, int_array, float_array, data
+                                            v = base64.b64decode(value).decode("ascii").replace("\u0000", "")
+                                            send_raw = False
+                                        elif type(v) in [int, float]:
+                                            v = dref_round(local_path=d, local_value=value)
+                                        if d not in self._dref_cache or self._dref_cache[d] != v:  # cached rounded value
+                                            if d != ZULU_TIME_SEC or print_zulu % 120 == 0:
+                                                print("DREF", d, self._dref_cache.get(d), " -> ", v)
+                                            e = DatarefEvent(
+                                                sim=self,
+                                                dataref=d,
+                                                value=value if send_raw else v,  # send raw value if possible
+                                                cascade=d in self.simulator_variable_to_monitor.keys(),
+                                            )
+                                            self.inc(COCKPITDECKS_INTVAR.UPDATE_ENQUEUED.value)
+                                            self._dref_cache[d] = v
                                 else:
                                     logger.warning(f"dataref {didx} not found")
                         else:
@@ -1280,7 +1387,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         self.datarefs = self.datarefs | paths
         self._max_monitored = max(self._max_monitored, len(self.datarefs))
 
-        logger.log(SPAM_LEVEL, f"add_simulator_variable_to_monitor: added {paths}")
+        print(f"add_simulator_variable_to_monitor: added {paths}")
         if MONITOR_DATAREF_USAGE:
             logger.info(f">>>>> monitoring++{len(simulator_variables)}/{len(self.datarefs)}/{self._max_monitored} {reason if reason is not None else ''}")
 
