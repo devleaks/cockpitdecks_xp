@@ -290,6 +290,10 @@ class XPlaneInstruction(SimulatorInstruction, XPRESTObject):
 
             command_block = instruction_block.get(keyw)
 
+            if len(instruction_block) == 0:
+                logger.info(f"instruction block is empty")
+                return None
+
             # single simple command to execute
             if type(command_block) is str:
                 # Examples:
@@ -909,14 +913,6 @@ class XPlaneWebSocket(XPlaneREST):
     # It is not possible get the the value of a dataref just once
     # through web service.
     #
-    # def get_dataref_value(self, path, on: bool = True) -> int:
-    #     dref = self.get_dataref_info_by_name(path)
-    #     if dref is not None:
-    #         action = "dataref_subscribe_values" if on else "dataref_unsubscribe_values"
-    #         return self.send({"type": action, "params": {REST_DATAREFS: [{"id": dref.ident}]}})
-    #     logger.warning(f"dataref {path} not found in X-Plane datarefs database")
-    #     return -1
-
     def split_dataref_path(self, path):
         name = path
         index = -1
@@ -1072,7 +1068,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         self.datarefs = set()  # list of datarefs currently monitored
         self._max_monitored = 0
 
-        self.ws_event = None  # thread to read X-Plane UDP port for datarefs
+        self.ws_event = threading.Event()
         self.ws_thread = None
         self._dref_cache = {}
         self.observables = []  # cannot create them here since XPlane does not exist yet...
@@ -1207,7 +1203,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         last_read_ts = datetime.now()
         total_read_time = 0.0
         self.set_internal_variable(name=COCKPITDECKS_INTVAR.INTDREF_CONNECTION_STATUS.value, value=3, cascade=True)
-        while self.ws_event is not None and not self.ws_event.is_set():
+        while not self.ws_event.is_set():
             try:
                 message = self.ws.receive(timeout=RECEIVE_TIMEOUT)
                 if message is None:
@@ -1336,7 +1332,6 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
             except:
                 logger.error(f"ws_receiver: other error", exc_info=True)
 
-        self.ws_event = None
         self.set_internal_variable(name=COCKPITDECKS_INTVAR.INTDREF_CONNECTION_STATUS.value, value=2, cascade=True)
         logger.info("..websocket listener terminated")
 
@@ -1371,9 +1366,15 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         self._dref_cache = {}
         logger.debug("done")
 
+    def print_currently_monitored(self):
+        print(f">>>>> currently monitored:\n{'\n'.join(sorted(self.datarefs))}")
+
     def add_simulator_variables_to_monitor(self, simulator_variables, reason: str | None = None):
         if not self.connected:
             logger.debug(f"would add {self.remove_local_datarefs(simulator_variables.keys())}")
+            return
+        if len(simulator_variables) == 0:
+            logger.debug("no variable to add")
             return
         # Add those to monitor
         super().add_simulator_variables_to_monitor(simulator_variables=simulator_variables)
@@ -1387,13 +1388,17 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         self.datarefs = self.datarefs | paths
         self._max_monitored = max(self._max_monitored, len(self.datarefs))
 
-        print(f"add_simulator_variable_to_monitor: added {paths}")
+        print(f">>>>> add_simulator_variable_to_monitor: {reason}: added {paths}")
+        self.print_currently_monitored()
         if MONITOR_DATAREF_USAGE:
             logger.info(f">>>>> monitoring++{len(simulator_variables)}/{len(self.datarefs)}/{self._max_monitored} {reason if reason is not None else ''}")
 
     def remove_simulator_variables_to_monitor(self, simulator_variables: dict, reason: str | None = None):
         if not self.connected and len(self.simulator_variable_to_monitor) > 0:
             logger.debug(f"would remove {simulator_variables.keys()}/{self._max_monitored}")
+            return
+        if len(simulator_variables) == 0:
+            logger.debug("no variable to remove")
             return
         # Add those to monitor
         paths = set()
@@ -1413,6 +1418,8 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         self.datarefs = self.datarefs - paths
         logger.debug(f"removed {paths}")
         super().remove_simulator_variables_to_monitor(simulator_variables=simulator_variables)
+        print(f">>>>> remove_simulator_variables_to_monitor: {reason}: removed {paths}")
+        self.print_currently_monitored()
         if MONITOR_DATAREF_USAGE:
             logger.info(f">>>>> monitoring--{len(simulator_variables)}/{len(self.datarefs)}/{self._max_monitored} {reason if reason is not None else ''}")
 
@@ -1456,8 +1463,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
             logger.warning("not connected. cannot not start.")
             return
 
-        if self.ws_event is None:  # Thread for X-Plane datarefs
-            self.ws_event = threading.Event()
+        if not self.ws_event.is_set():  # Thread for X-Plane datarefs
             self.ws_thread = threading.Thread(target=self.ws_receiver, name="XPlane::WebSocket Listener")
             self.ws_thread.start()
             logger.info("websocket listener started")
@@ -1472,7 +1478,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         self.cockpit.reload_pages()  # to take into account updated values
 
     def stop(self):
-        if self.ws_event is not None:
+        if not self.ws_event.is_set():
             self.cleanup()
             self.ws_event.set()
             logger.debug("stopping websocket listener..")
@@ -1481,7 +1487,6 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
             self.ws_thread.join(wait)
             if self.ws_thread.is_alive():
                 logger.warning("..thread may hang in ws.receive()..")
-            self.ws_event = None
             logger.debug("..websocket listener stopped")
         else:
             logger.debug("websocket listener not running")
