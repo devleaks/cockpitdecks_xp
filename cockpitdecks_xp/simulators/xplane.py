@@ -1561,7 +1561,9 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         print(f">>>>> add_simulator_event_to_monitor: {reason}: added {paths}")
         self.print_currently_monitored_events()
         if MONITOR_RESOURCE_USAGE:
-            logger.info(f">>>>> monitoring events++{len(simulator_events)}/{len(self.cmdevents)}/{self._max_events_monitored} {reason if reason is not None else ''}")
+            logger.info(
+                f">>>>> monitoring events++{len(simulator_events)}/{len(self.cmdevents)}/{self._max_events_monitored} {reason if reason is not None else ''}"
+            )
 
     def remove_simulator_events_to_monitor(self, simulator_events: dict, reason: str | None = None):
         if not self.connected and len(self.simulator_event_to_monitor) > 0:
