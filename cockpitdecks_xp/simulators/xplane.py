@@ -505,7 +505,7 @@ class Command(XPlaneInstruction):
         return self.simulator.execute_ws_command(path=self.path)
 
     def _execute(self):
-        self.rest_execute()
+        self.ws_execute()
         self.clean_timer()
 
 
