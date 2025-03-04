@@ -1,4 +1,5 @@
-# Class for interface with X-Plane using UDP protocol.
+# Class for interface with X-Plane using REST/WebSocket API.
+# See https://developer.x-plane.com/article/x-plane-web-api
 #
 from __future__ import annotations
 
@@ -7,13 +8,13 @@ import threading
 import logging
 import json
 import base64
-import traceback
 from enum import Enum
+from datetime import datetime, timedelta, timezone
 
 import requests
-from simple_websocket import Client, ConnectionClosed
 
-from datetime import datetime, timedelta, timezone
+from simple_websocket import Client, ConnectionClosed
+from packaging.version import Version
 
 from cockpitdecks_xp import __version__
 from cockpitdecks import CONFIG_KW, ENVIRON_KW, SPAM_LEVEL, MONITOR_RESOURCE_USAGE
@@ -72,26 +73,8 @@ PERMANENT_SIMULATOR_EVENTS = {}  #
 # REST OBJECTS
 #
 
+
 # REST API model keywords
-
-REST_COMMANDS = "commands"
-REST_DATA = "data"
-REST_DATAREFS = "datarefs"
-REST_DURATION = "duration"
-REST_IDENT = "id"
-REST_INDEX = "index"
-REST_ISACTIVE = "is_active"
-REST_NAME = "name"
-REST_PARAMS = "params"
-REST_REQID = "req_id"
-REST_RESULT = "result"
-REST_SUCCESS = "success"
-REST_TYPE = "type"
-REST_VALUE = "value"
-REST_VALUE_TYPE = "value_type"
-INDICES = "_index_list"
-
-
 class REST_KW(Enum):
     COMMANDS = "commands"
     DATA = "data"
@@ -110,6 +93,7 @@ class REST_KW(Enum):
     VALUE_TYPE = "value_type"
 
 
+# WEB API RETURN CODES
 class REST_RESPONSE(Enum):
     RESULT = "result"
     COMMAND_ACTIVE = "command_update_is_active"
@@ -118,6 +102,7 @@ class REST_RESPONSE(Enum):
 
 # Dataref object
 class XPRESTObject:
+    """Small structure to host a dataref or a command meta data: Id, value_type, etc."""
 
     def __init__(self, path: str) -> None:
         self.path = path
@@ -129,13 +114,13 @@ class XPRESTObject:
     def ident(self) -> int | None:
         if not self.valid:
             return None
-        return self.config[REST_IDENT]
+        return self.config[REST_KW.IDENT.value]
 
     @property
     def value_type(self) -> int | None:
         if not self.valid:
             return None
-        return self.config[REST_VALUE_TYPE]
+        return self.config[REST_KW.VALUE_TYPE.value]
 
     def init(self, cache):
         self.config = cache.get(self.path)
@@ -155,10 +140,6 @@ class Dataref(SimulatorVariable, XPRESTObject):
     """
     A Dataref is an internal value of the simulation software made accessible to outside modules,
     plugins, or other software in general.
-
-    From Spring 2024 on, this is no longer inspired from Sandy Barbour and the like in Python 2.
-    Most of the original code has been removed, because unused.
-    This is a modern implementation, specific to Cockpitdecks. It even use X-Plane 12.1 REST/WebSocket API.
     """
 
     def __init__(self, path: str, simulator: XPlane, is_string: bool = False):
@@ -170,10 +151,6 @@ class Dataref(SimulatorVariable, XPRESTObject):
         if "[" in path:  # sim/some/values[4]
             self.root_name = self.name[: self.name.find("[")]
             self.index = int(self.name[self.name.find("[") + 1 : self.name.find("]")])
-
-    # @property
-    # def dataref(self) -> str:
-    #     return self.name
 
     def __str__(self) -> str:
         return f"{self.path}={self.value()}"
@@ -187,9 +164,9 @@ class Dataref(SimulatorVariable, XPRESTObject):
         response = requests.get(url)
         data = response.json()
         logger.debug(f"result: {data}")
-        if REST_DATA in data and type(data[REST_DATA]) in [bytes, str]:
-            return base64.b64decode(data[REST_DATA]).decode("ascii").replace("\u0000", "")
-        return data[REST_DATA]
+        if REST_KW.DATA.value in data and type(data[REST_KW.DATA.value]) in [bytes, str]:
+            return base64.b64decode(data[REST_KW.DATA.value]).decode("ascii").replace("\u0000", "")
+        return data[REST_KW.DATA.value]
 
     def rest_write(self) -> bool:
         if not self.valid:
@@ -199,7 +176,7 @@ class Dataref(SimulatorVariable, XPRESTObject):
         if self.value_type == "data":
             value = str(value).encode("ascii")
             value = base64.b64encode(value).decode("ascii")
-        payload = {REST_IDENT: self.ident, REST_DATA: value}
+        payload = {REST_KW.IDENT.value: self.ident, REST_KW.DATA.value: value}
         url = f"{self.api_url}/datarefs/{self.ident}/value"
         print(f"writing dataref {self.path}: {url}, {payload}")  # logger.debug
         response = requests.patch(url, json=payload)
@@ -220,20 +197,20 @@ class Dataref(SimulatorVariable, XPRESTObject):
             else:
                 logger.warning(f"{self.name} is internal variable, not saved to simulator")
         else:
-            logger.warning(f"{self.name} not writable")
+            logger.warning(f"{self.name} is not writable")
         return False
 
 
 # Events from simulator
 #
 class DatarefEvent(SimulatorEvent):
-    """Dataref Update Event"""
+    """Dataref Update Event
+
+    Event is created with dataref and new value and enqueued.
+    The value change and propagation only occurs when executed (run) by the Cockpit.
+    """
 
     def __init__(self, sim: Simulator, dataref: str, value: float | str, cascade: bool, autorun: bool = True):
-        """Dataref Update Event.
-
-        Args:
-        """
         self.dataref_path = dataref
         self.value = value
         self.cascade = cascade
@@ -289,7 +266,7 @@ NOT_A_COMMAND = [
 class XPlaneInstruction(SimulatorInstruction, XPRESTObject):
     """An Instruction sent to the XPlane Simulator to execute some action.
 
-    [description]
+    This is more an abstract base class, with a new() factory to handle instruction block.
     """
 
     def __init__(self, name: str, simulator: XPlane, delay: float = 0.0, condition: str | None = None, button: "Button" = None) -> None:
@@ -471,8 +448,7 @@ class XPlaneInstruction(SimulatorInstruction, XPRESTObject):
 #
 class Command(XPlaneInstruction):
     """
-    A Button activation will instruct the simulator software to perform an action.
-    A Command is the message that the simulation sofware is expecting to perform that action.
+    X-Plane simple Command, executed by CommandOnce API.
     """
 
     def __init__(self, simulator: XPlane, path: str, name: str | None = None, delay: float = 0.0, condition: str | None = None):
@@ -491,7 +467,7 @@ class Command(XPlaneInstruction):
             if not self.valid:
                 logger.error(f"command {self.path} is not valid")
                 return False
-        payload = {REST_IDENT: self.ident, REST_DURATION: 0.0}
+        payload = {REST_KW.IDENT.value: self.ident, REST_KW.DURATION.value: 0.0}
         url = f"{self.simulator.api_url}/command/{self.ident}/activate"
         response = requests.post(url, json=payload)
         data = response.json()
@@ -502,7 +478,7 @@ class Command(XPlaneInstruction):
         return False
 
     def ws_execute(self) -> int:
-        return self.simulator.execute_ws_command(path=self.path)
+        return self.simulator.set_command_is_active_with_duration(path=self.path)
 
     def _execute(self):
         self.ws_execute()
@@ -511,8 +487,7 @@ class Command(XPlaneInstruction):
 
 class BeginEndCommand(Command):
     """
-    A Button activation will instruct the simulator software to perform an action.
-    A Command is the message that the simulation sofware is expecting to perform that action.
+    X-Plane long command, executed between CommandBegin/CommandEnd API.
     """
 
     DURATION = 5
@@ -525,7 +500,7 @@ class BeginEndCommand(Command):
         if not self.valid:
             logger.error(f"command {self.path} not found")
             return False
-        payload = {REST_IDENT: self.ident, REST_DURATION: self.DURATION}
+        payload = {REST_KW.IDENT.value: self.ident, REST_KW.DURATION.value: self.DURATION}
         url = f"{self.simulator.api_url}/command/{self.ident}/activate"
         response = requests.post(url, json=payload)
         data = response.json()
@@ -540,7 +515,7 @@ class BeginEndCommand(Command):
             logger.error(f"command {self.path} not found")
             return -1
         self.is_on = not self.is_on
-        return self.simulator.execute_ws_long_command(path=self.path, active=self.is_on)
+        return self.simulator.set_command_is_active_without_duration(path=self.path, active=self.is_on)
 
     def _execute(self):
         self.ws_execute()
@@ -549,8 +524,7 @@ class BeginEndCommand(Command):
 
 class SetDataref(XPlaneInstruction):
     """
-    A Button activation will instruct the simulator software to perform an action.
-    A Command is the message that the simulation sofware is expecting to perform that action.
+    Instruction to update the value of a dataref in X-Plane simulator.
     """
 
     def __init__(self, simulator: XPlane, path: str, value=None, formula: str | None = None, delay: float = 0.0, condition: str | None = None):
@@ -575,6 +549,24 @@ class SetDataref(XPlaneInstruction):
     def value(self, value):
         self._value = value
 
+    def rest_execute(self) -> bool:
+        if not self.valid:
+            self.init(cache=self.simulator.all_datarefs)
+            if not self.valid:
+                logger.error(f"dataref {self.path} is not valid")
+                return False
+        value = self.value
+        if self.value_type == "data":
+            value = str(value).encode("ascii")
+            value = base64.b64encode(value).decode("ascii")
+        payload = {REST_KW.DATA.value: self.value}
+        url = f"{self.simulator.api_url}/datarefs/{self.ident}/value"
+        response = requests.patch(url, json=payload)
+        if response.status_code == 200:
+            return True
+        logger.error(f"execute: {response}")
+        return False
+
     def ws_execute(self) -> int:
         if not self.valid:
             logger.error(f"set-dataref {self.path} invalid")
@@ -592,8 +584,15 @@ class SetDataref(XPlaneInstruction):
 
 # Events from simulator
 #
-class CommandEvent(SimulatorEvent):
-    """Data Update Event"""
+class CommandActiveEvent(SimulatorEvent):
+    """Command Active Event
+
+    Sent by X-Plane when the command is activated. A command is activated "twice", once with the active=true,
+    and once with active=false. For regular commands, either one can safely be ignored.
+    When the event occurs it simply is reported on console log.
+    To execute instructions following the coccurence of the event, it is necessry to define an Observable of type event
+    and supply Instruction(s) to execute in the definition of the observable.
+    """
 
     def __init__(self, sim: Simulator, command: str, is_active: bool, cascade: bool, autorun: bool = True):
         """Simulator Event: Something occurred in the simulator software.
@@ -613,7 +612,7 @@ class CommandEvent(SimulatorEvent):
 
     def run(self, just_do_it: bool = False) -> bool:
         if just_do_it:
-            logger.info(f"event {self.name} occured in simulator")
+            logger.info(f"event {self.name} occured in simulator with active={self.is_active}")
         else:
             self.enqueue()
             logger.debug("enqueued")
@@ -624,6 +623,15 @@ class CommandEvent(SimulatorEvent):
 # REST API
 #
 class Cache:
+    """Accessory structure to host datarref and command cache
+    of current X-Plane instance.
+    Must be "refreshed" each time a new connection is created.
+    Must be refreshed each time a new aircraft is loaded (for new datarefs, commands, etc.)
+    Reload_cache() is provided in XPlaneREST.
+
+    There is no faster structure than a python dict() for (name,value) pair storage.
+    """
+
     def __init__(self, api: XPlaneREST) -> None:
         self.api = api
         self._data = dict()
@@ -635,11 +643,11 @@ class Cache:
         response = requests.get(url)
         if response.status_code == 200:  # We have version 12.1.4 or above
             raw = response.json()
-            data = raw[REST_DATA]
-            self._data = {c[REST_NAME]: c for c in data}
-            self._ids = {c[REST_IDENT]: c for c in data}
+            data = raw[REST_KW.DATA.value]
+            self._data = {c[REST_KW.NAME.value]: c for c in data}
+            self._ids = {c[REST_KW.IDENT.value]: c for c in data}
             self._valid = set()
-            logger.debug(f"{path[1:]} cached")
+            logger.debug(f"{path[1:]} cached ({len(self._data)} entries)")
             return
         logger.error(f"load: response={response.status_code}")
 
@@ -660,15 +668,24 @@ class Cache:
     def get_by_id(self, ident: int):
         r = self._ids.get(ident)
         if r is not None:
-            self._valid.add(r[REST_NAME])
+            self._valid.add(r[REST_KW.NAME.value])
             return r
         return None
 
     def is_valid(self, name):
         return name in self._valid
 
+    def save(self, filename):
+        with open(filename, "w") as fp:
+            json.dump(self._data, fp)
+
 
 class XPlaneREST:
+    """Utility routines specific to REST API.
+       Used by variables and instructions to execute their tasks.
+
+    See https://developer.x-plane.com/article/x-plane-web-api/#REST_API.
+    """
 
     def __init__(self, host: str, port: int) -> None:
         self.host = host
@@ -683,11 +700,13 @@ class XPlaneREST:
     @property
     # See https://stackoverflow.com/questions/7019643/overriding-properties-in-python
     # to overwrite @property definition
-    def api_url(self) -> str | None:
+    def api_url(self) -> str:
+        """URL for the REST API."""
         return f"http://{self.host}:{self.port}/api{self._api}"
 
     @property
-    def ws_url(self) -> str | None:
+    def ws_url(self) -> str:
+        """URL for the WebSocket API"""
         url = self.api_url
         if url is not None:
             return url.replace("http:", "ws:")
@@ -695,7 +714,14 @@ class XPlaneREST:
 
     @property
     def api_is_available(self) -> bool:
+        """Important call that checks whether API is reachable
+        API may not be reachable if:
+         - X-Plane version before 12.1.4,
+         - X-Plane is not running
+        """
         try:
+            # Relies on the fact that first version is always provided.
+            # Later verion offer alternative ot detect API
             response = requests.get(self.api_url + "/v1/datarefs/count")
             if response.status_code == 200:
                 return True
@@ -736,9 +762,10 @@ class XPlaneREST:
             api_versions = api_details.get("versions")
             if api is None:
                 if api_versions is None:
-                    logger.error("cannot determine api")
+                    logger.error("cannot determine api, api not set")
                     return
-                api = api_versions[-1]
+                api = api_versions[-1]  # takes the latest one, hoping it is the latest in time...
+                logger.error(f"selected api {api}")
             if api in api_versions:
                 self.version = api
                 self._api = "/" + api
@@ -751,11 +778,14 @@ class XPlaneREST:
     def reload_caches(self):
         self.all_datarefs = Cache(self)
         self.all_datarefs.load("/datarefs")
+        # self.all_datarefs.save("datarefs.json")
         if self.version == "v2":  # >
             self.all_commands = Cache(self)
             self.all_commands.load("/commands")
+            # self.all_commands.save("commands.json")
         else:
             self.all_commands = {}
+        logger.info(f"dataref cache ({len(self.all_datarefs._data)}) and command cache ({len(self.all_datarefs._data)}) reloaded")
 
     def get_dataref_info_by_name(self, path: str):
         return self.all_datarefs.get_by_name(path) if self.all_datarefs is not None else None
@@ -774,12 +804,12 @@ class XPlaneREST:
 # WEBSOCKET API
 #
 class XPlaneWebSocket(XPlaneREST):
-    """
-    Get data from XPlane via network.
-    Use a class to implement RAI Pattern for the UDP socket.
+    """Utility routines specific to WebSocket API
+
+    See https://developer.x-plane.com/article/x-plane-web-api/#Websockets_API.
     """
 
-    MAX_WARNING = 5
+    MAX_WARNING = 5  # number of times it reports it cannot connect
 
     def __init__(self, host: str, port: int):
         # Open a UDP Socket to receive on Port 49000
@@ -795,10 +825,15 @@ class XPlaneWebSocket(XPlaneREST):
         self.connect_thread = None  # threading.Thread()
         self._already_warned = 0
 
-    def next_req(self):
+    @property
+    def next_req(self) -> int:
+        """Provides request number for WebSocket requests"""
         self.req_number = self.req_number + 1
         return self.req_number
 
+    # ################################
+    # Connection to web socket
+    #
     @property
     def connected(self) -> bool:
         res = self.ws is not None
@@ -809,15 +844,6 @@ class XPlaneWebSocket(XPlaneREST):
                 logger.warning("no connection")
             self._already_warned = self._already_warned + 1
         return res
-
-    def start(self):
-        logger.warning("nothing to start")
-
-    def stop(self):
-        logger.warning("nothing to stop")
-
-    def cleanup(self):
-        self.disconnect_websocket()
 
     def connect_websocket(self):
         if self.ws is None:
@@ -834,12 +860,16 @@ class XPlaneWebSocket(XPlaneREST):
                         logger.warning(f"web socket url is none {url}")
             except:
                 logger.error("connect", exc_info=True)
+        else:
+            logger.warning("already connected")
 
     def disconnect_websocket(self):
         if self.ws is not None:
             self.ws.close()
             self.ws = None
-        logger.info("websocket closed")
+            logger.info("websocket closed")
+        else:
+            logger.warning("already disconnected")
 
     def connect_loop(self):
         """
@@ -854,25 +884,27 @@ class XPlaneWebSocket(XPlaneREST):
         while self.should_not_connect is not None and not self.should_not_connect.is_set():
             if not self.connected:
                 try:
+                    logger.info("not connected, trying..")
                     self.connect_websocket()
                     if self.connected:
                         self._already_warned = 0
                         number_of_timeouts = 0
                         logger.info(f"beacon: {self.capabilities()}")
-                        # if "XPlaneVersion" in self.beacon_data:
-                        #     curr = self.beacon_data["XPlaneVersion"]
-                        #     if curr < XP_MIN_VERSION:
-                        #         logger.warning(f"X-Plane version {curr} detected, minimal version is {XP_MIN_VERSION}")
-                        #         logger.warning(f"Some features in Cockpitdecks may not work properly")
-                        #     elif curr > XP_MAX_VERSION:
-                        #         logger.warning(f"X-Plane version {curr} detected, maximal version is {XP_MAX_VERSION}")
-                        #         logger.warning(f"Some features in Cockpitdecks may not work properly")
-                        #     else:
-                        #         logger.info(f"X-Plane version meets current criteria ({XP_MIN_VERSION}<= {curr} <={XP_MAX_VERSION})")
-                        #         logger.info(f"connected")
+                        if self.xp_version is not None:
+                            curr = Version(self.xp_version)
+                            xpmin = Version(XP_MIN_VERSION_STR)
+                            xpmax = Version(XP_MAX_VERSION_STR)
+                            if curr < xpmin:
+                                logger.warning(f"X-Plane version {curr} detected, minimal version is {xpmin}")
+                                logger.warning("Some features in Cockpitdecks may not work properly")
+                            elif curr > xpmax:
+                                logger.warning(f"X-Plane version {curr} detected, maximal version is {xpmax}")
+                                logger.warning("Some features in Cockpitdecks may not work properly")
+                            else:
+                                logger.info(f"X-Plane version meets current criteria ({xpmin}<= {curr} <={xpmax})")
                         logger.debug("..connected, starting websocket listener..")
                         self.start()
-                        self.inc(COCKPITDECKS_INTVAR.STARTS.value)
+                        # self.inc(COCKPITDECKS_INTVAR.STARTS.value)
                         logger.info("..websocket listener started..")
                     else:
                         if self.ws_event is not None and not self.ws_event.is_set():
@@ -884,7 +916,7 @@ class XPlaneWebSocket(XPlaneREST):
                                 logger.warning("too many times out, websocket listener terminated")  # ignore
                                 self.ws_event.set()
                                 self.set_internal_variable(name=COCKPITDECKS_INTVAR.INTDREF_CONNECTION_STATUS.value, value=1, cascade=True)
-                                self.inc(COCKPITDECKS_INTVAR.STOPS.value)
+                                # self.inc(COCKPITDECKS_INTVAR.STOPS.value)
 
                         if number_of_timeouts >= MAX_TIMEOUT_COUNT and cnt % WARN_FREQ == 0:
                             logger.error(f"..X-Plane instance not found on local network.. ({datetime.now().strftime('%H:%M:%S')})")
@@ -923,7 +955,7 @@ class XPlaneWebSocket(XPlaneREST):
         """
         if self.should_not_connect is not None:
             logger.debug("disconnecting..")
-            self.cleanup()
+            self.disconnect_websocket()
             self.should_not_connect.set()
             wait = RECONNECT_TIMEOUT
             logger.debug(f"..asked to stop connection monitor.. (this may last {wait} secs.)")
@@ -934,16 +966,20 @@ class XPlaneWebSocket(XPlaneREST):
             logger.debug("..disconnected")
         else:
             if self.connected:
-                self.cleanup()
+                self.disconnect_websocket()
                 logger.debug("..connection monitor not running..disconnected")
             else:
                 logger.debug("..not connected")
 
+    # ################################
+    # I/O
+    #
+    # Generic payload "send" function, unique
     def send(self, payload: dict) -> int:
         if self.connected:
             if payload is not None and len(payload) > 0:
-                req_id = self.next_req()
-                payload[REST_REQID] = req_id
+                req_id = self.next_req
+                payload[REST_KW.REQID.value] = req_id
                 self._requests[req_id] = None
                 self.ws.send(json.dumps(payload))
                 print(f"sent {payload}")
@@ -955,8 +991,8 @@ class XPlaneWebSocket(XPlaneREST):
 
     # Dataref operations
     #
-    # It is not possible get the the value of a dataref just once
-    # through web service.
+    # Note: It is not possible get the the value of a dataref just once
+    # through web service. No get_dataref_value().
     #
     def split_dataref_path(self, path):
         name = path
@@ -987,9 +1023,12 @@ class XPlaneWebSocket(XPlaneREST):
         if dref is None:
             logger.warning(f"dataref {path} not found in X-Plane datarefs database")
             return -1
-        payload = {REST_TYPE: "dataref_set_values", REST_PARAMS: {REST_DATAREFS: [{REST_IDENT: dref[REST_IDENT], REST_VALUE: value}]}}
+        payload = {
+            REST_KW.TYPE.value: "dataref_set_values",
+            REST_KW.PARAMS.value: {REST_KW.DATAREFS.value: [{REST_KW.IDENT.value: dref[REST_KW.IDENT.value], REST_KW.VALUE.value: value}]},
+        }
         if split:
-            payload[REST_PARAMS][REST_DATAREFS][0][REST_INDEX] = index
+            payload[REST_KW.PARAMS.value][REST_KW.DATAREFS.value][0][REST_KW.INDEX.value] = index
         return self.send(payload)
 
     def register_dataref_value_event(self, path: str, on: bool = True) -> int:
@@ -998,11 +1037,11 @@ class XPlaneWebSocket(XPlaneREST):
             logger.warning(f"dataref {path} not found in X-Plane datarefs database")
             return -1
         payload = {
-            REST_TYPE: "dataref_subscribe_values" if on else "dataref_unsubscribe_values",
-            REST_PARAMS: {REST_DATAREFS: [{REST_IDENT: dref[REST_IDENT], REST_VALUE: value}]},
+            REST_KW.TYPE.value: "dataref_subscribe_values" if on else "dataref_unsubscribe_values",
+            REST_KW.PARAMS.value: {REST_KW.DATAREFS.value: [{REST_KW.IDENT.value: dref[REST_KW.IDENT.value], REST_KW.VALUE.value: value}]},
         }
         if split:
-            payload[REST_PARAMS][REST_DATAREFS][0][REST_INDEX] = index
+            payload[REST_KW.PARAMS.value][REST_KW.DATAREFS.value][0][REST_KW.INDEX.value] = index
             if on:
                 self.append_index(dref, index)
             else:
@@ -1017,70 +1056,79 @@ class XPlaneWebSocket(XPlaneREST):
                 logger.warning(f"dataref {path} not found in X-Plane datarefs database")
                 continue
             if split:
-                drefs.append({REST_IDENT: dref[REST_IDENT], REST_INDEX: index})
+                drefs.append({REST_KW.IDENT.value: dref[REST_KW.IDENT.value], REST_KW.INDEX.value: index})
                 self.append_index(dref, index)
                 if on:
                     self.append_index(dref, index)
                 else:
                     self.remove_index(dref, index)
             else:
-                drefs.append({REST_IDENT: dref[REST_IDENT]})
+                drefs.append({REST_KW.IDENT.value: dref[REST_KW.IDENT.value]})
 
         if len(drefs) > 0:
             action = "dataref_subscribe_values" if on else "dataref_unsubscribe_values"
-            return self.send({REST_TYPE: action, REST_PARAMS: {REST_DATAREFS: drefs}})
+            return self.send({REST_KW.TYPE.value: action, REST_KW.PARAMS.value: {REST_KW.DATAREFS.value: drefs}})
         logger.warning("no bulk datarefs to register")
         return -1
 
     # Command operations
     #
-    def register_command_active_event(self, path: str, on: bool = True) -> int:
+    def register_command_is_active_event(self, path: str, on: bool = True) -> int:
         cmd = self.get_command_info_by_name(path)
         if cmd is not None:
             action = "command_subscribe_is_active" if on else "command_unsubscribe_is_active"
-            return self.send({REST_TYPE: action, REST_PARAMS: {REST_COMMANDS: [{REST_IDENT: cmd[REST_IDENT]}]}})
+            return self.send({REST_KW.TYPE.value: action, REST_KW.PARAMS.value: {REST_KW.COMMANDS.value: [{REST_KW.IDENT.value: cmd[REST_KW.IDENT.value]}]}})
         logger.warning(f"command {path} not found in X-Plane commands database")
         return -1
 
-    def register_bulk_command_active_event(self, paths, on: bool = True) -> int:
+    def register_bulk_command_is_active_event(self, paths, on: bool = True) -> int:
         cmds = []
         for path in paths:
             cmdref = self.get_command_info_by_name(path=path)
             if cmdref is None:
                 logger.warning(f"command {path} not found in X-Plane commands database")
                 continue
-            cmds.append({REST_IDENT: cmdref[REST_IDENT]})
+            cmds.append({REST_KW.IDENT.value: cmdref[REST_KW.IDENT.value]})
 
         if len(cmds) > 0:
             action = "command_subscribe_is_active" if on else "command_unsubscribe_is_active"
-            return self.send({REST_TYPE: action, REST_PARAMS: {REST_COMMANDS: cmds}})
+            return self.send({REST_KW.TYPE.value: action, REST_KW.PARAMS.value: {REST_KW.COMMANDS.value: cmds}})
         logger.warning("no bulk command active to register")
         return -1
 
-    def execute_ws_command(self, path: str, duration: float = 0.0) -> int:
+    def set_command_is_active_with_duration(self, path: str, duration: float = 0.0) -> int:
         cmd = self.get_command_info_by_name(path)
         if cmd is not None:
             return self.send(
                 {
-                    REST_TYPE: "command_set_is_active",
-                    REST_PARAMS: {REST_COMMANDS: [{REST_IDENT: cmd[REST_IDENT], REST_DURATION: duration, REST_ISACTIVE: True}]},
+                    REST_KW.TYPE.value: "command_set_is_active",
+                    REST_KW.PARAMS.value: {
+                        REST_KW.COMMANDS.value: [
+                            {REST_KW.IDENT.value: cmd[REST_KW.IDENT.value], REST_KW.ISACTIVE.value: True, REST_KW.DURATION.value: duration}
+                        ]
+                    },
                 }
             )
         logger.warning(f"command {path} not found in X-Plane commands database")
         return -1
 
-    def execute_ws_long_command(self, path: str, active: bool) -> int:
+    def set_command_is_active_without_duration(self, path: str, active: bool) -> int:
         cmd = self.get_command_info_by_name(path)
         if cmd is not None:
-            return self.send({REST_TYPE: "command_set_is_active", REST_PARAMS: {REST_COMMANDS: [{REST_IDENT: cmd[REST_IDENT], REST_ISACTIVE: active}]}})
+            return self.send(
+                {
+                    REST_KW.TYPE.value: "command_set_is_active",
+                    REST_KW.PARAMS.value: {REST_KW.COMMANDS.value: [{REST_KW.IDENT.value: cmd[REST_KW.IDENT.value], REST_KW.ISACTIVE.value: active}]},
+                }
+            )
         logger.warning(f"command {path} not found in X-Plane commands database")
         return -1
 
-    def execute_start_ws_long_command(self, path) -> int:
-        return self.execute_ws_long_command(path=path, active=True)
+    def set_command_is_active_true_without_duration(self, path) -> int:
+        return self.set_command_is_active_without_duration(path=path, active=True)
 
-    def execute_end_ws_long_command(self, path) -> int:
-        return self.execute_ws_long_command(path=path, active=False)
+    def set_command_is_active_false_without_duration(self, path) -> int:
+        return self.set_command_is_active_without_duration(path=path, active=False)
 
 
 # #############################################
@@ -1093,12 +1141,6 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
     """
 
     name = "X-Plane"
-
-    # constants
-    MCAST_GRP = "239.255.1.1"
-    MCAST_PORT = 49707  # (MCAST_PORT was 49000 for XPlane10)
-    BEACON_TIMEOUT = 3.0  # seconds
-    TERMINATE_QUEUE = "quit"
 
     def __init__(self, cockpit, environ):
         self._inited = False
@@ -1126,12 +1168,6 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
 
         self.init()
 
-    def init(self):
-        if self._inited:
-            return
-        self.set_internal_variable(name=COCKPITDECKS_INTVAR.INTDREF_CONNECTION_STATUS.value, value=0, cascade=True)
-        self._inited = True
-
     def __del__(self):
         if not self._inited:
             return
@@ -1139,16 +1175,19 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         self.datarefs = set()
         self.disconnect()
 
+    def init(self):
+        if self._inited:
+            return
+        # Create internal variable to hold the connection status
+        self.set_internal_variable(name=COCKPITDECKS_INTVAR.INTDREF_CONNECTION_STATUS.value, value=0, cascade=True)
+        self._inited = True
+
     def get_version(self) -> list:
         return [f"{type(self).__name__} {__version__}"]
 
     # ################################
     # Factories
     #
-    def instruction_factory(self, name: str, instruction_block: str | dict) -> XPlaneInstruction:
-        # logger.debug(f"creating xplane instruction {name}")
-        return XPlaneInstruction.new(name=name, simulator=self, instruction_block=instruction_block)
-
     def variable_factory(self, name: str, is_string: bool = False, creator: str = None) -> Dataref:
         # logger.debug(f"creating xplane dataref {name}")
         variable = Dataref(path=name, simulator=self, is_string=is_string)
@@ -1157,6 +1196,10 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         if creator is not None:
             variable._creator = creator
         return variable
+
+    def instruction_factory(self, name: str, instruction_block: str | dict) -> XPlaneInstruction:
+        # logger.debug(f"creating xplane instruction {name}")
+        return XPlaneInstruction.new(name=name, simulator=self, instruction_block=instruction_block)
 
     def replay_event_factory(self, name: str, value):
         logger.debug(f"creating replay event {name}")
@@ -1199,6 +1242,9 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
             ret = ret | obs.get_variables()
         return ret
 
+    def simulator_variable_changed(self, data: SimulatorVariable):
+        pass
+
     #
     # Events
     def get_events(self) -> set:
@@ -1208,27 +1254,272 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
             ret = ret | obs.get_events()
         return ret
 
-    def simulator_variable_changed(self, data: SimulatorVariable):
-        pass
-
+    # ################################
+    # X-Plane Interface
     #
     # Instruction execution
+    #
     def execute_command(self, command: Command | None):
-        if command is None:
-            logger.warning("no command")
-            return
-        elif not command.is_valid():
+        self.command_once(command)
+
+    def command_once(self, command: Command):
+        if not command.is_valid():
             logger.warning(f"command '{command}' not sent (command placeholder, no command, do nothing)")
             return
         if not self.connected:
             logger.warning(f"no connection ({command})")
             return
         if command.path is not None:
-            self.execute_ws_command(path=command.path)
+            self.set_command_is_active_with_duration(path=command.path)
             logger.log(SPAM_LEVEL, f"executed {command}")
         else:
             logger.warning("no command to execute")
 
+    def command_begin(self, command: Command):
+        if not command.is_valid():
+            logger.warning(f"command '{command}' not sent (command placeholder, no command, do nothing)")
+            return
+        if not self.connected:
+            logger.warning(f"no connection ({command})")
+            return
+        if command.path is not None:
+            self.set_command_is_active_true_without_duration(path=command.path)
+            logger.log(SPAM_LEVEL, f"executing {command}..")
+        else:
+            logger.warning("no command to execute")
+
+    def command_end(self, command: Command):
+        if not command.is_valid():
+            logger.warning(f"command '{command}' not sent (command placeholder, no command, do nothing)")
+            return
+        if not self.connected:
+            logger.warning(f"no connection ({command})")
+            return
+        if command.path is not None:
+            self.set_command_is_active_false_without_duration(path=command.path)
+            logger.log(SPAM_LEVEL, f"..executed {command}")
+        else:
+            logger.warning("no command to execute")
+
+    #
+    # Variable management
+    def add_permanently_monitored_simulator_variables(self):
+        """Add simulator variables coming from different sources (cockpit, simulator itself, etc.)
+        that are always monitored (for all aircrafts)
+        """
+        self.create_local_observables()
+        dtdrefs = self.get_permanently_monitored_simulator_variables()
+        logger.info(f"monitoring {len(dtdrefs)} permanent simulator variables")
+        if len(dtdrefs) > 0:
+            self.add_simulator_variables_to_monitor(simulator_variables=dtdrefs, reason="permanent simulator variables")
+
+    def clean_simulator_variables_to_monitor(self):
+        if not self.connected:
+            return
+        self.register_bulk_dataref_value_event(paths=self.datarefs, on=False)
+        self.datarefs = set()
+        super().clean_simulator_variable_to_monitor()
+        self._strdref_cache = {}
+        self._dref_cache = {}
+        logger.debug("done")
+
+    def print_currently_monitored_variables(self, with_value: bool = True):
+        if with_value:
+            for d in self.datarefs:
+                dref = self.get_variable(d)
+                print(f"{dref.name}={dref.value()}")
+            return
+        print(f">>>>> currently monitored variables:\n{'\n'.join(sorted(self.datarefs))}")
+
+    def add_simulator_variables_to_monitor(self, simulator_variables, reason: str | None = None):
+        if not self.connected:
+            logger.debug(f"would add {list(filter(lambda d: not Dataref.is_internal_variable(d), simulator_variables))}")
+            return
+        if len(simulator_variables) == 0:
+            logger.debug("no variable to add")
+            return
+        # Add those to monitor
+        super().add_simulator_variables_to_monitor(simulator_variables=simulator_variables)
+        paths = set()
+        for d in simulator_variables.values():
+            if d.is_internal:
+                logger.debug(f"local dataref {d.name} is not monitored")
+                continue
+            paths.add(d.name)
+        if len(paths) > 0:
+            self.register_bulk_dataref_value_event(paths=paths, on=True)
+            self.datarefs = self.datarefs | paths
+            self._max_datarefs_monitored = max(self._max_datarefs_monitored, len(self.datarefs))
+
+            print(f">>>>> add_simulator_variable_to_monitor: {reason}: added {paths}")
+        else:
+            logger.debug("no variable to add")
+        self.print_currently_monitored_variables()
+        if MONITOR_RESOURCE_USAGE:
+            logger.info(
+                f">>>>> monitoring variables++{len(simulator_variables)}/{len(self.datarefs)}/{self._max_datarefs_monitored} {reason if reason is not None else ''}"
+            )
+
+    def remove_simulator_variables_to_monitor(self, simulator_variables: dict, reason: str | None = None):
+        if not self.connected and len(self.simulator_variable_to_monitor) > 0:
+            logger.debug(f"would remove {simulator_variables.keys()}/{self._max_datarefs_monitored}")
+            return
+        if len(simulator_variables) == 0:
+            logger.debug("no variable to remove")
+            return
+        # Add those to monitor
+        paths = set()
+        for d in simulator_variables.values():
+            if d.is_internal:
+                logger.debug(f"internal variable {d.name} is not monitored")
+                continue
+            if d.name in self.simulator_variable_to_monitor.keys():
+                if self.simulator_variable_to_monitor[d.name] == 1:  # will be decreased by 1 in super().remove_simulator_variable_to_monitor()
+                    paths.add(d.name)
+                else:
+                    logger.debug(f"{d.name} monitored {self.simulator_variable_to_monitor[d.name]} times")
+            else:
+                logger.debug(f"no need to remove {d.name}")
+        if len(paths) > 0:
+            self.register_bulk_dataref_value_event(paths=paths, on=False)
+            self.datarefs = self.datarefs - paths
+            super().remove_simulator_variables_to_monitor(simulator_variables=simulator_variables)
+            print(f">>>>> remove_simulator_variables_to_monitor: {reason}: removed {paths}")
+        else:
+            logger.debug("no variable to remove")
+        self.print_currently_monitored_variables()
+        if MONITOR_RESOURCE_USAGE:
+            logger.info(
+                f">>>>> monitoring variables--{len(simulator_variables)}/{len(self.datarefs)}/{self._max_datarefs_monitored} {reason if reason is not None else ''}"
+            )
+
+    def remove_all_simulator_variables_to_monitor(self):
+        datarefs = [d for d in self.cockpit.variable_database.database.values() if type(d) is Dataref]
+        if not self.connected and len(datarefs) > 0:
+            logger.debug(f"would remove {', '.join([d.name for d in datarefs])}")
+            return
+        # This is not necessary:
+        # self.remove_simulator_variable_to_monitor(datarefs)
+        super().remove_all_simulator_variable()
+
+    def add_all_simulator_variables_to_monitor(self):
+        if not self.connected:
+            return
+        # Add permanently monitored drefs
+        self.add_permanently_monitored_simulator_variables()
+        # Add those to monitor
+        paths = set()
+        for path in self.simulator_variable_to_monitor.keys():
+            d = self.cockpit.variable_database.get(path)
+            if d is not None:
+                paths.add(d.name)
+            else:
+                logger.warning(f"no dataref {path}")
+        if len(paths) > 0:
+            self.register_bulk_dataref_value_event(paths=paths, on=True)
+            self.datarefs = self.datarefs | paths
+            self._max_datarefs_monitored = max(self._max_datarefs_monitored, len(self.datarefs))
+            logger.log(SPAM_LEVEL, f"added {paths}")
+        logger.debug("no simulator variable to monitor")
+
+    #
+    # Event management
+    def add_permanently_monitored_simulator_events(self):
+        # self.create_local_observables() should be called before
+        # like in add_permanently_monitored_simulator_variables()
+        cmds = self.get_permanently_monitored_simulator_events()
+        logger.info(f"monitoring {len(cmds)} permanent simulator events")
+        self.add_simulator_events_to_monitor(simulator_events=cmds, reason="permanent simulator events")
+
+    def clean_simulator_events_to_monitor(self):
+        if not self.connected:
+            return
+        self.register_bulk_command_is_active_event(paths=self.cmdevents, on=False)
+        self.cmdevents = set()
+        super().clean_simulator_event_to_monitor()
+        self._strdref_cache = {}
+        self._dref_cache = {}
+        logger.debug("done")
+
+    def print_currently_monitored_events(self):
+        print(f">>>>> currently monitored events:\n{'\n'.join(sorted(self.cmdevents))}")
+
+    def add_simulator_events_to_monitor(self, simulator_events, reason: str | None = None):
+        if not self.connected:
+            logger.debug(f"would add {self.remove_internal_events(simulator_events.keys())}")
+            return
+        if len(simulator_events) == 0:
+            logger.debug("no event to add")
+            return
+        # Add those to monitor
+        super().add_simulator_events_to_monitor(simulator_events=simulator_events)
+        paths = set()
+        for d in simulator_events:
+            if d not in self.cmdevents:  # if not already monitored
+                paths.add(d)
+            else:
+                logger.debug(f"{d} already monitored {self.simulator_event_to_monitor[d]} times")
+        self.register_bulk_command_is_active_event(paths=paths, on=True)
+        self.cmdevents = self.cmdevents | paths
+        self._max_events_monitored = max(self._max_events_monitored, len(self.cmdevents))
+        print(f">>>>> add_simulator_event_to_monitor: {reason}: added {paths}")
+        self.print_currently_monitored_events()
+        if MONITOR_RESOURCE_USAGE:
+            logger.info(
+                f">>>>> monitoring events++{len(simulator_events)}/{len(self.cmdevents)}/{self._max_events_monitored} {reason if reason is not None else ''}"
+            )
+
+    def remove_simulator_events_to_monitor(self, simulator_events: dict, reason: str | None = None):
+        if not self.connected and len(self.simulator_event_to_monitor) > 0:
+            logger.debug(f"would remove {simulator_events.keys()}/{self._max_events_monitored}")
+            return
+        if len(simulator_events) == 0:
+            logger.debug("no event to remove")
+            return
+        # Add those to monitor
+        paths = set()
+        for d in simulator_events:
+            if d in self.simulator_event_to_monitor.keys():
+                if self.simulator_event_to_monitor[d] == 1:  # will be decreased by 1 in super().remove_simulator_event_to_monitor()
+                    paths.add(d)
+                else:
+                    logger.debug(f"{d} monitored {self.simulator_event_to_monitor[d]} times")
+            else:
+                if d in self.cmdevents:
+                    logger.warning(f"should not see this, path={d}, event monitored not registered?")
+                logger.debug(f"no need to remove {d}")
+        self.register_bulk_command_is_active_event(paths=paths, on=False)
+        self.cmdevents = self.cmdevents - paths
+        super().remove_simulator_events_to_monitor(simulator_events=simulator_events)
+        print(f">>>>> remove_simulator_events_to_monitor: {reason}: removed {paths}")
+        self.print_currently_monitored_events()
+        if MONITOR_RESOURCE_USAGE:
+            logger.info(
+                f">>>>> monitoring events--{len(simulator_events)}/{len(self.cmdevents)}/{self._max_events_monitored} {reason if reason is not None else ''}"
+            )
+
+    def remove_all_simulator_events_to_monitor(self):
+        datarefs = [d for d in self.cockpit.event_database.database.values() if type(d) is Dataref]
+        if not self.connected and len(datarefs) > 0:
+            logger.debug(f"would remove {', '.join([d.name for d in datarefs])}")
+            return
+        super().remove_all_simulator_event()
+
+    def add_all_simulator_events_to_monitor(self):
+        if not self.connected:
+            return
+        # Add permanently monitored drefs
+        self.add_permanently_monitored_simulator_events()
+        # Add those to monitor
+        paths = set(self.simulator_event_to_monitor.keys())
+        self.register_bulk_dataref_value_event(paths=paths, on=True)
+        self.cmdevents = self.cmdevents | paths
+        self._max_events_monitored = max(self._max_events_monitored, len(self.cmdevents))
+        logger.log(SPAM_LEVEL, f"added {paths}")
+
+    # ################################
+    # Cockpit interface
+    #
     def ws_receiver(self):
         """Read and decode websocket messages and enqueue change events"""
 
@@ -1272,31 +1563,31 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
                 resp_type = ""
                 try:
                     data = json.loads(message)
-                    resp_type = data[REST_TYPE]
+                    resp_type = data[REST_KW.TYPE.value]
 
                     if resp_type == REST_RESPONSE.RESULT.value:
 
-                        req_id = data.get(REST_REQID)
+                        req_id = data.get(REST_KW.REQID.value)
                         if req_id is not None:
-                            self._requests[req_id] = data[REST_SUCCESS]
-                        if not data[REST_SUCCESS]:
-                            errmsg = REST_SUCCESS if data[REST_SUCCESS] else "failed"
+                            self._requests[req_id] = data[REST_KW.SUCCESS.value]
+                        if not data[REST_KW.SUCCESS.value]:
+                            errmsg = REST_KW.SUCCESS.value if data[REST_KW.SUCCESS.value] else "failed"
                             errmsg = errmsg + " " + data.get("error_message")
                             errmsg = errmsg + " (" + data.get("error_code") + ")"
                             logger.warning(f"req. {req_id}: {errmsg}")
                         else:
-                            logger.debug(f"req. {req_id}: {REST_SUCCESS if data[REST_SUCCESS] else 'failed'}")
+                            logger.debug(f"req. {req_id}: {REST_KW.SUCCESS.value if data[REST_KW.SUCCESS.value] else 'failed'}")
 
                     elif resp_type == REST_RESPONSE.DATAREF_UPDATE.value:
 
-                        if REST_DATA in data:
-                            for didx, value in data[REST_DATA].items():
+                        if REST_KW.DATA.value in data:
+                            for didx, value in data[REST_KW.DATA.value].items():
                                 if didx in self._dref_cache and self._dref_cache[didx] == value:  # cached RAW value
                                     continue
                                 self._dref_cache[didx] = value
                                 dref = self.get_dataref_info_by_id(int(didx))
                                 if dref is not None:
-                                    d = dref[REST_NAME]
+                                    d = dref[REST_KW.NAME.value]
                                     if d == ZULU_TIME_SEC:
                                         now = datetime.now().astimezone(tz=timezone.utc)
                                         seconds_since_midnight = (now - now.replace(hour=0, minute=0, second=0, microsecond=0)).total_seconds()
@@ -1307,7 +1598,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
                                             cascade=(total_reads % 2 == 0),
                                         )
                                         print_zulu = print_zulu + 1
-                                    if dref.get(REST_VALUE_TYPE) is not None and dref[REST_VALUE_TYPE] in ["int_array", "float_array"]:
+                                    if dref.get(REST_KW.VALUE_TYPE.value) is not None and dref[REST_KW.VALUE_TYPE.value] in ["int_array", "float_array"]:
                                         # we must check each individual value...
                                         if INDICES not in dref or len(value) != len(dref[INDICES]):
                                             logger.warning(f"dataref array {d} size mismatch ({len(value)}/{len(dref[INDICES])})")
@@ -1328,7 +1619,9 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
                                         v = value
                                         send_raw = True
                                         if (
-                                            dref.get(REST_VALUE_TYPE) is not None and dref[REST_VALUE_TYPE] == "data" and type(value) in [bytes, str]
+                                            dref.get(REST_KW.VALUE_TYPE.value) is not None
+                                            and dref[REST_KW.VALUE_TYPE.value] == "data"
+                                            and type(value) in [bytes, str]
                                         ):  # float, double, int, int_array, float_array, data
                                             v = base64.b64decode(value).decode("ascii").replace("\u0000", "")
                                             send_raw = False
@@ -1352,20 +1645,21 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
 
                     elif resp_type == REST_RESPONSE.COMMAND_ACTIVE.value:
 
-                        if REST_DATA in data:
-                            for cidx, value in data[REST_DATA].items():
+                        if REST_KW.DATA.value in data:
+                            for cidx, value in data[REST_KW.DATA.value].items():
                                 cref = self.get_command_info_by_id(int(cidx))
                                 if cref is not None:
-                                    c = cref[REST_NAME]
+                                    c = cref[REST_KW.NAME.value]
                                     v = value
                                     print("CMD", c, value)
-                                    e = CommandEvent(sim=self, command=c, is_active=value, cascade=True)
+                                    e = CommandActiveEvent(sim=self, command=c, is_active=value, cascade=True)
                                     self.inc(COCKPITDECKS_INTVAR.COMMAND_ACTIVE_ENQUEUED.value)
                         else:
                             logger.warning(f"no data: {data}")
 
                     else:
                         logger.warning(f"invalid response type {resp_type}: {data}")
+
                 except:
                     logger.warning(f"decode data {data} failed", exc_info=True)
 
@@ -1375,7 +1669,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
                 self.ws_event.set()
 
             except:
-                logger.error(f"ws_receiver: other error", exc_info=True)
+                logger.error("ws_receiver: other error", exc_info=True)
 
         if self.ws is not None:  # in case we did not receive a ConnectionClosed event
             self.ws.close()
@@ -1383,247 +1677,6 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
 
         self.set_internal_variable(name=COCKPITDECKS_INTVAR.INTDREF_CONNECTION_STATUS.value, value=2, cascade=True)
         logger.info("..websocket listener terminated")
-
-    # ################################
-    # X-Plane Interface
-    #
-    def command_once(self, command: Command):
-        self.execute_command(command)
-
-    def command_begin(self, command: Command):
-        if command.path is not None:
-            self.execute_command(Command(path=command.path + "/begin", simulator=self, name="BeginCommand:" + command.path))
-        else:
-            logger.warning("no command")
-
-    def command_end(self, command: Command):
-        if command.path is not None:
-            self.execute_command(Command(path=command.path + "/end", simulator=self, name="EndCommand:" + command.path))
-        else:
-            logger.warning("no command")
-
-    #
-    # Variable management
-    def add_permanently_monitored_simulator_variables(self):
-        """Add simulator variables coming from different sources (cockpit, simulator itself, etc.)
-        that are always monitored (for all aircrafts)
-        """
-        self.create_local_observables()
-        dtdrefs = self.get_permanently_monitored_simulator_variables()
-        logger.info(f"monitoring {len(dtdrefs)} permanent simulator variables")
-        self.add_simulator_variables_to_monitor(simulator_variables=dtdrefs, reason="permanent simulator variables")
-
-    def remove_internal_variables(self, datarefs) -> list:
-        return list(filter(lambda d: not Dataref.is_internal_variable(d), datarefs))
-
-    def clean_simulator_variables_to_monitor(self):
-        if not self.connected:
-            return
-        self.register_bulk_dataref_value_event(paths=self.datarefs, on=False)
-        self.datarefs = set()
-        super().clean_simulator_variable_to_monitor()
-        self._strdref_cache = {}
-        self._dref_cache = {}
-        logger.debug("done")
-
-    def print_currently_monitored_variables(self, with_value: bool = True):
-        if with_value:
-            for d in self.datarefs:
-                dref = self.get_variable(d)
-                print(f"{dref.name}={dref.value()}")
-            return
-        print(f">>>>> currently monitored:\n{'\n'.join(sorted(self.datarefs))}")
-
-    def add_simulator_variables_to_monitor(self, simulator_variables, reason: str | None = None):
-        if not self.connected:
-            logger.debug(f"would add {self.remove_internal_variables(simulator_variables.keys())}")
-            return
-        if len(simulator_variables) == 0:
-            logger.debug("no variable to add")
-            return
-        # Add those to monitor
-        super().add_simulator_variables_to_monitor(simulator_variables=simulator_variables)
-        paths = set()
-        for d in simulator_variables.values():
-            if d.is_internal:
-                logger.debug(f"local dataref {d.name} is not monitored")
-                continue
-            paths.add(d.name)
-        self.register_bulk_dataref_value_event(paths=paths, on=True)
-        self.datarefs = self.datarefs | paths
-        self._max_datarefs_monitored = max(self._max_datarefs_monitored, len(self.datarefs))
-
-        print(f">>>>> add_simulator_variable_to_monitor: {reason}: added {paths}")
-        self.print_currently_monitored_variables()
-        if MONITOR_RESOURCE_USAGE:
-            logger.info(
-                f">>>>> monitoring variables++{len(simulator_variables)}/{len(self.datarefs)}/{self._max_datarefs_monitored} {reason if reason is not None else ''}"
-            )
-
-    def remove_simulator_variables_to_monitor(self, simulator_variables: dict, reason: str | None = None):
-        if not self.connected and len(self.simulator_variable_to_monitor) > 0:
-            logger.debug(f"would remove {simulator_variables.keys()}/{self._max_datarefs_monitored}")
-            return
-        if len(simulator_variables) == 0:
-            logger.debug("no variable to remove")
-            return
-        # Add those to monitor
-        paths = set()
-        for d in simulator_variables.values():
-            if d.is_internal:
-                logger.debug(f"internal variable {d.name} is not monitored")
-                continue
-            if d.name in self.simulator_variable_to_monitor.keys():
-                if self.simulator_variable_to_monitor[d.name] == 1:  # will be decreased by 1 in super().remove_simulator_variable_to_monitor()
-                    paths.add(d.name)
-                else:
-                    logger.debug(f"{d.name} monitored {self.simulator_variable_to_monitor[d.name]} times")
-            else:
-                logger.debug(f"no need to remove {d.name}")
-
-        self.register_bulk_dataref_value_event(paths=paths, on=False)
-        self.datarefs = self.datarefs - paths
-        super().remove_simulator_variables_to_monitor(simulator_variables=simulator_variables)
-        print(f">>>>> remove_simulator_variables_to_monitor: {reason}: removed {paths}")
-        self.print_currently_monitored_variables()
-        if MONITOR_RESOURCE_USAGE:
-            logger.info(
-                f">>>>> monitoring variables--{len(simulator_variables)}/{len(self.datarefs)}/{self._max_datarefs_monitored} {reason if reason is not None else ''}"
-            )
-
-    def remove_all_simulator_variables_to_monitor(self):
-        datarefs = [d for d in self.cockpit.variable_database.database.values() if type(d) is Dataref]
-        if not self.connected and len(datarefs) > 0:
-            logger.debug(f"would remove {', '.join([d.name for d in datarefs])}")
-            return
-        # This is not necessary:
-        # self.remove_simulator_variable_to_monitor(datarefs)
-        super().remove_all_simulator_variable()
-
-    def add_all_simulator_variables_to_monitor(self):
-        if not self.connected:
-            return
-        # Add permanently monitored drefs
-        self.add_permanently_monitored_simulator_variables()
-        # Add those to monitor
-        paths = set()
-        for path in self.simulator_variable_to_monitor.keys():
-            d = self.cockpit.variable_database.get(path)
-            if d is not None:
-                paths.add(d.name)
-            else:
-                logger.warning(f"no dataref {path}")
-        self.register_bulk_dataref_value_event(paths=paths, on=True)
-        self.datarefs = self.datarefs | paths
-        self._max_datarefs_monitored = max(self._max_datarefs_monitored, len(self.datarefs))
-        logger.log(SPAM_LEVEL, f"added {paths}")
-
-    #
-    # Event management
-    def add_permanently_monitored_simulator_events(self):
-        # self.create_local_observables() should be called before
-        # like in add_permanently_monitored_simulator_variables()
-        cmds = self.get_permanently_monitored_simulator_events()
-        logger.info(f"monitoring {len(cmds)} permanent simulator events")
-        self.add_simulator_events_to_monitor(simulator_events=cmds, reason="permanent simulator events")
-
-    def clean_simulator_events_to_monitor(self):
-        if not self.connected:
-            return
-        self.register_bulk_command_active_event(paths=self.cmdevents, on=False)
-        self.cmdevents = set()
-        super().clean_simulator_event_to_monitor()
-        self._strdref_cache = {}
-        self._dref_cache = {}
-        logger.debug("done")
-
-    def print_currently_monitored_events(self):
-        print(f">>>>> currently monitored events:\n{'\n'.join(sorted(self.cmdevents))}")
-
-    def add_simulator_events_to_monitor(self, simulator_events, reason: str | None = None):
-        if not self.connected:
-            logger.debug(f"would add {self.remove_internal_events(simulator_events.keys())}")
-            return
-        if len(simulator_events) == 0:
-            logger.debug("no event to add")
-            return
-        # Add those to monitor
-        super().add_simulator_events_to_monitor(simulator_events=simulator_events)
-        paths = set()
-        for d in simulator_events:
-            if d not in self.cmdevents:  # if not already monitored
-                paths.add(d)
-            else:
-                logger.debug(f"{d} already monitored {self.simulator_event_to_monitor[d]} times")
-        self.register_bulk_command_active_event(paths=paths, on=True)
-        self.cmdevents = self.cmdevents | paths
-        self._max_events_monitored = max(self._max_events_monitored, len(self.cmdevents))
-        print(f">>>>> add_simulator_event_to_monitor: {reason}: added {paths}")
-        self.print_currently_monitored_events()
-        if MONITOR_RESOURCE_USAGE:
-            logger.info(
-                f">>>>> monitoring events++{len(simulator_events)}/{len(self.cmdevents)}/{self._max_events_monitored} {reason if reason is not None else ''}"
-            )
-
-    def remove_simulator_events_to_monitor(self, simulator_events: dict, reason: str | None = None):
-        if not self.connected and len(self.simulator_event_to_monitor) > 0:
-            logger.debug(f"would remove {simulator_events.keys()}/{self._max_events_monitored}")
-            return
-        if len(simulator_events) == 0:
-            logger.debug("no event to remove")
-            return
-        # Add those to monitor
-        paths = set()
-        for d in simulator_events:
-            if d in self.simulator_event_to_monitor.keys():
-                if self.simulator_event_to_monitor[d] == 1:  # will be decreased by 1 in super().remove_simulator_event_to_monitor()
-                    paths.add(d)
-                else:
-                    logger.debug(f"{d} monitored {self.simulator_event_to_monitor[d]} times")
-            else:
-                if d in self.cmdevents:
-                    logger.warning(f"should not see this, path={d}, event monitored not registered?")
-                logger.debug(f"no need to remove {d}")
-        self.register_bulk_command_active_event(paths=paths, on=False)
-        self.cmdevents = self.cmdevents - paths
-        super().remove_simulator_events_to_monitor(simulator_events=simulator_events)
-        print(f">>>>> remove_simulator_events_to_monitor: {reason}: removed {paths}")
-        self.print_currently_monitored_events()
-        if MONITOR_RESOURCE_USAGE:
-            logger.info(
-                f">>>>> monitoring events--{len(simulator_events)}/{len(self.cmdevents)}/{self._max_events_monitored} {reason if reason is not None else ''}"
-            )
-
-    def remove_all_simulator_events_to_monitor(self):
-        datarefs = [d for d in self.cockpit.event_database.database.values() if type(d) is Dataref]
-        if not self.connected and len(datarefs) > 0:
-            logger.debug(f"would remove {', '.join([d.name for d in datarefs])}")
-            return
-        super().remove_all_simulator_event()
-
-    def add_all_simulator_events_to_monitor(self):
-        if not self.connected:
-            return
-        # Add permanently monitored drefs
-        self.add_permanently_monitored_simulator_events()
-        # Add those to monitor
-        paths = set(self.simulator_event_to_monitor.keys())
-        self.register_bulk_dataref_value_event(paths=paths, on=True)
-        self.cmdevents = self.cmdevents | paths
-        self._max_events_monitored = max(self._max_events_monitored, len(self.cmdevents))
-        logger.log(SPAM_LEVEL, f"added {paths}")
-
-    # ################################
-    # Cockpit interface
-    #
-    def cleanup(self):
-        """
-        Called when before disconnecting.
-        Just before disconnecting, we try to cancel dataref UDP reporting in X-Plane
-        """
-        self.clean_simulator_variables_to_monitor()
-        self.clean_simulator_events_to_monitor()
-        super().cleanup()
 
     def start(self):
         if not self.connected:
@@ -1639,6 +1692,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
 
         # When restarted after network failure, should clean all datarefs
         # then reload datarefs from current page of each deck
+        self.reload_caches()
         self.clean_simulator_variables_to_monitor()
         self.add_all_simulator_variables_to_monitor()
         self.clean_simulator_events_to_monitor()
@@ -1660,6 +1714,15 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
                 logger.debug("..websocket listener stopped")
         else:
             logger.debug("websocket listener not running")
+
+    def cleanup(self):
+        """
+        Called when before disconnecting.
+        Just before disconnecting, we try to cancel dataref UDP reporting in X-Plane
+        """
+        self.clean_simulator_variables_to_monitor()
+        self.clean_simulator_events_to_monitor()
+        super().cleanup()
 
     def terminate(self):
         logger.debug(f"currently {'not ' if self.ws_event is None else ''}running. terminating..")
