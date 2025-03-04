@@ -982,7 +982,7 @@ class XPlaneWebSocket(XPlaneREST):
                 payload[REST_KW.REQID.value] = req_id
                 self._requests[req_id] = None
                 self.ws.send(json.dumps(payload))
-                print(f"sent {payload}")
+                print(f">>> sent {payload}")
                 return req_id
             else:
                 logger.warning("no payload")
@@ -1171,6 +1171,8 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
     def __del__(self):
         if not self._inited:
             return
+        self.register_bulk_command_is_active_event(paths=self.cmdevents, on=False)
+        self.cmdevents = set()
         self.register_bulk_dataref_value_event(paths=self.datarefs, on=False)
         self.datarefs = set()
         self.disconnect()
@@ -1499,11 +1501,17 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
             )
 
     def remove_all_simulator_events_to_monitor(self):
-        datarefs = [d for d in self.cockpit.event_database.database.values() if type(d) is Dataref]
-        if not self.connected and len(datarefs) > 0:
-            logger.debug(f"would remove {', '.join([d.name for d in datarefs])}")
+        if not self.connected and len(self.cmdevents) > 0:
+            logger.debug(f"would remove {', '.join(self.cmdevents)}")
             return
+        before = len(self.cmdevents)
+        self.register_bulk_command_is_active_event(paths=self.cmdevents, on=False)
+        print(f">>>>> remove_simulator_events_to_monitor: remove all: removed {self.cmdevents}")
         super().remove_all_simulator_event()
+        if MONITOR_RESOURCE_USAGE:
+            logger.info(
+                f">>>>> monitoring events--{before}/{len(self.cmdevents)}/{self._max_events_monitored} remove all"
+            )
 
     def add_all_simulator_events_to_monitor(self):
         if not self.connected:
@@ -1512,7 +1520,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         self.add_permanently_monitored_simulator_events()
         # Add those to monitor
         paths = set(self.simulator_event_to_monitor.keys())
-        self.register_bulk_dataref_value_event(paths=paths, on=True)
+        self.register_bulk_command_is_active_event(paths=paths, on=True)
         self.cmdevents = self.cmdevents | paths
         self._max_events_monitored = max(self._max_events_monitored, len(self.cmdevents))
         logger.log(SPAM_LEVEL, f"added {paths}")
@@ -1567,6 +1575,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
 
                     if resp_type == REST_RESPONSE.RESULT.value:
 
+                        print(f"<<< received {data}")
                         req_id = data.get(REST_KW.REQID.value)
                         if req_id is not None:
                             self._requests[req_id] = data[REST_KW.SUCCESS.value]
@@ -1629,7 +1638,8 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
                                             v = dref_round(local_path=d, local_value=value)
                                         if d not in self._dref_cache or self._dref_cache[d] != v:  # cached rounded value
                                             if d != ZULU_TIME_SEC or print_zulu % 120 == 0:
-                                                print("DREF", d, self._dref_cache.get(d), " -> ", v)
+                                                d2 = self.get_variable(name=d)
+                                                print("DREF", d, self._dref_cache.get(d), " -> ", v, d2.listeners)
                                             e = DatarefEvent(
                                                 sim=self,
                                                 dataref=d,
@@ -1720,19 +1730,24 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         Called when before disconnecting.
         Just before disconnecting, we try to cancel dataref UDP reporting in X-Plane
         """
+        logger.info("..requesting to stop websocket emission..")
         self.clean_simulator_variables_to_monitor()
         self.clean_simulator_events_to_monitor()
-        super().cleanup()
+
+    def restart_reset(self):
+        self.stop()
+        self.disconnect()
+        self.connect()
+        self.start()
 
     def terminate(self):
         logger.debug(f"currently {'not ' if self.ws_event is None else ''}running. terminating..")
         logger.info("terminating..")
-        logger.info("..requesting to stop websocket emission..")
-        self.clean_simulator_variables_to_monitor()  # stop monitoring all datarefs
         logger.info("..stopping websocket listener..")
         self.stop()
         logger.info("..deleting datarefs..")
         self.remove_all_simulator_variables_to_monitor()
+        self.remove_all_simulator_events_to_monitor()
         logger.info("..disconnecting from simulator..")
         self.disconnect()
         logger.info("..terminated")
