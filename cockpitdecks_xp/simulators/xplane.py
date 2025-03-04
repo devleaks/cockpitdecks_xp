@@ -30,7 +30,7 @@ from ..resources.daytimeobs import DaytimeObservable
 from ..resources.cmdlsnr import MapCommandObservable
 
 logger = logging.getLogger(__name__)
-# logger.setLevel(SPAM_LEVEL)  # To see which dataref are requested
+logger.setLevel(SPAM_LEVEL)  # To see which dataref are requested
 # logger.setLevel(logging.DEBUG)
 
 # #############################################
@@ -72,6 +72,7 @@ PERMANENT_SIMULATOR_EVENTS = {}  #
 # #############################################
 # REST OBJECTS
 #
+INDICES = "indices"
 
 
 # REST API model keywords
@@ -178,7 +179,7 @@ class Dataref(SimulatorVariable, XPRESTObject):
             value = base64.b64encode(value).decode("ascii")
         payload = {REST_KW.IDENT.value: self.ident, REST_KW.DATA.value: value}
         url = f"{self.api_url}/datarefs/{self.ident}/value"
-        print(f"writing dataref {self.path}: {url}, {payload}")  # logger.debug
+        logger.log(SPAM_LEVEL, f"writing dataref {self.path}: {url}, {payload}")  # logger.debug
         response = requests.patch(url, json=payload)
         if response.status_code == 200:
             data = response.json()
@@ -726,7 +727,7 @@ class XPlaneREST:
             if response.status_code == 200:
                 return True
         except:
-            logger.error("is_available", exc_info=True)
+            logger.error("api unreachable, may be X-Plane is not running")
         return False
 
     def capabilities(self) -> dict:
@@ -785,7 +786,7 @@ class XPlaneREST:
             # self.all_commands.save("commands.json")
         else:
             self.all_commands = {}
-        logger.info(f"dataref cache ({len(self.all_datarefs._data)}) and command cache ({len(self.all_datarefs._data)}) reloaded")
+        logger.info(f"dataref cache ({len(self.all_datarefs._data)}) and command cache ({len(self.all_datarefs._data)}) reloaded {'*-><-'*15}")
 
     def get_dataref_info_by_name(self, path: str):
         return self.all_datarefs.get_by_name(path) if self.all_datarefs is not None else None
@@ -821,7 +822,7 @@ class XPlaneWebSocket(XPlaneREST):
         self.req_number = 0
         self._requests = {}
 
-        self.should_not_connect = None  # threading.Event(
+        self.should_not_connect = None  # threading.Event()
         self.connect_thread = None  # threading.Thread()
         self._already_warned = 0
 
@@ -859,7 +860,7 @@ class XPlaneWebSocket(XPlaneREST):
                     else:
                         logger.warning(f"web socket url is none {url}")
             except:
-                logger.error("connect", exc_info=True)
+                logger.error("cannot connect", exc_info=True)
         else:
             logger.warning("already connected")
 
@@ -937,7 +938,7 @@ class XPlaneWebSocket(XPlaneREST):
     # ################################
     # Interface
     #
-    def connect(self):
+    def connect(self, reload_cache: bool = False):
         """
         Starts connect loop.
         """
@@ -947,7 +948,9 @@ class XPlaneWebSocket(XPlaneREST):
             self.connect_thread.start()
             logger.debug("connection monitor started")
         else:
-            logger.debug("connection monitor should not connect")
+            if reload_cache:
+                self.reload_caches()
+            logger.debug("connection monitor connected")
 
     def disconnect(self):
         """
@@ -982,7 +985,7 @@ class XPlaneWebSocket(XPlaneREST):
                 payload[REST_KW.REQID.value] = req_id
                 self._requests[req_id] = None
                 self.ws.send(json.dumps(payload))
-                print(f">>> sent {payload}")
+                logger.log(SPAM_LEVEL, f">>> sent {payload}")
                 return req_id
             else:
                 logger.warning("no payload")
@@ -1068,7 +1071,8 @@ class XPlaneWebSocket(XPlaneREST):
         if len(drefs) > 0:
             action = "dataref_subscribe_values" if on else "dataref_unsubscribe_values"
             return self.send({REST_KW.TYPE.value: action, REST_KW.PARAMS.value: {REST_KW.DATAREFS.value: drefs}})
-        logger.warning("no bulk datarefs to register")
+        action = "register" if on else "unregister"
+        logger.warning(f"no bulk datarefs to {action}")
         return -1
 
     # Command operations
@@ -1093,7 +1097,8 @@ class XPlaneWebSocket(XPlaneREST):
         if len(cmds) > 0:
             action = "command_subscribe_is_active" if on else "command_unsubscribe_is_active"
             return self.send({REST_KW.TYPE.value: action, REST_KW.PARAMS.value: {REST_KW.COMMANDS.value: cmds}})
-        logger.warning("no bulk command active to register")
+        action = "register" if on else "unregister"
+        logger.warning(f"no bulk command active to {action}")
         return -1
 
     def set_command_is_active_with_duration(self, path: str, duration: float = 0.0) -> int:
@@ -1329,9 +1334,9 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         if with_value:
             for d in self.datarefs:
                 dref = self.get_variable(d)
-                print(f"{dref.name}={dref.value()}")
+                logger.log(SPAM_LEVEL, f"{dref.name}={dref.value()}")
             return
-        print(f">>>>> currently monitored variables:\n{'\n'.join(sorted(self.datarefs))}")
+        logger.log(SPAM_LEVEL, f">>>>> currently monitored variables:\n{'\n'.join(sorted(self.datarefs))}")
 
     def add_simulator_variables_to_monitor(self, simulator_variables, reason: str | None = None):
         if not self.connected:
@@ -1353,7 +1358,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
             self.datarefs = self.datarefs | paths
             self._max_datarefs_monitored = max(self._max_datarefs_monitored, len(self.datarefs))
 
-            print(f">>>>> add_simulator_variable_to_monitor: {reason}: added {paths}")
+            logger.log(SPAM_LEVEL, f">>>>> add_simulator_variable_to_monitor: {reason}: added {paths}")
         else:
             logger.debug("no variable to add")
         self.print_currently_monitored_variables()
@@ -1386,7 +1391,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
             self.register_bulk_dataref_value_event(paths=paths, on=False)
             self.datarefs = self.datarefs - paths
             super().remove_simulator_variables_to_monitor(simulator_variables=simulator_variables)
-            print(f">>>>> remove_simulator_variables_to_monitor: {reason}: removed {paths}")
+            logger.log(SPAM_LEVEL, f">>>>> remove_simulator_variables_to_monitor: {reason}: removed {paths}")
         else:
             logger.debug("no variable to remove")
         self.print_currently_monitored_variables()
@@ -1444,7 +1449,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         logger.debug("done")
 
     def print_currently_monitored_events(self):
-        print(f">>>>> currently monitored events:\n{'\n'.join(sorted(self.cmdevents))}")
+        logger.log(SPAM_LEVEL, f">>>>> currently monitored events:\n{'\n'.join(sorted(self.cmdevents))}")
 
     def add_simulator_events_to_monitor(self, simulator_events, reason: str | None = None):
         if not self.connected:
@@ -1464,7 +1469,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         self.register_bulk_command_is_active_event(paths=paths, on=True)
         self.cmdevents = self.cmdevents | paths
         self._max_events_monitored = max(self._max_events_monitored, len(self.cmdevents))
-        print(f">>>>> add_simulator_event_to_monitor: {reason}: added {paths}")
+        logger.log(SPAM_LEVEL, f">>>>> add_simulator_event_to_monitor: {reason}: added {paths}")
         self.print_currently_monitored_events()
         if MONITOR_RESOURCE_USAGE:
             logger.info(
@@ -1493,7 +1498,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         self.register_bulk_command_is_active_event(paths=paths, on=False)
         self.cmdevents = self.cmdevents - paths
         super().remove_simulator_events_to_monitor(simulator_events=simulator_events)
-        print(f">>>>> remove_simulator_events_to_monitor: {reason}: removed {paths}")
+        logger.log(SPAM_LEVEL, f">>>>> remove_simulator_events_to_monitor: {reason}: removed {paths}")
         self.print_currently_monitored_events()
         if MONITOR_RESOURCE_USAGE:
             logger.info(
@@ -1506,12 +1511,10 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
             return
         before = len(self.cmdevents)
         self.register_bulk_command_is_active_event(paths=self.cmdevents, on=False)
-        print(f">>>>> remove_simulator_events_to_monitor: remove all: removed {self.cmdevents}")
+        logger.log(SPAM_LEVEL, f">>>>> remove_simulator_events_to_monitor: remove all: removed {self.cmdevents}")
         super().remove_all_simulator_event()
         if MONITOR_RESOURCE_USAGE:
-            logger.info(
-                f">>>>> monitoring events--{before}/{len(self.cmdevents)}/{self._max_events_monitored} remove all"
-            )
+            logger.info(f">>>>> monitoring events--{before}/{len(self.cmdevents)}/{self._max_events_monitored} remove all")
 
     def add_all_simulator_events_to_monitor(self):
         if not self.connected:
@@ -1546,11 +1549,11 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
             try:
                 message = self.ws.receive(timeout=RECEIVE_TIMEOUT)
                 if message is None:
-                    print("timeout, no message", datetime.now())
+                    logger.log(SPAM_LEVEL, f"timeout, no message at {datetime.now()}")
                     continue
 
                 if total_reads == 0:
-                    print("first message", datetime.now())
+                    logger.log(SPAM_LEVEL, f"first message at {datetime.now()}")
                 # Estimate response time
                 self.set_internal_variable(name=COCKPITDECKS_INTVAR.INTDREF_CONNECTION_STATUS.value, value=4, cascade=True)
 
@@ -1575,7 +1578,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
 
                     if resp_type == REST_RESPONSE.RESULT.value:
 
-                        print(f"<<< received {data}")
+                        logger.log(SPAM_LEVEL, f"<<< received {data}")
                         req_id = data.get(REST_KW.REQID.value)
                         if req_id is not None:
                             self._requests[req_id] = data[REST_KW.SUCCESS.value]
@@ -1615,7 +1618,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
                                             d1 = f"{d}[{idx}]"
                                             v = dref_round(local_path=d1, local_value=v1)
                                             if d1 not in self._dref_cache or self._dref_cache[d1] != v:  # cached rounded value
-                                                print("DREF ARRAY", cnt, d, idx, self._dref_cache.get(d1), " -> ", v)
+                                                logger.log(SPAM_LEVEL, f"DREF ARRAY: {d} {idx} {self._dref_cache.get(d1)} -> {v}")
                                                 e = DatarefEvent(
                                                     sim=self,
                                                     dataref=d1,
@@ -1638,8 +1641,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
                                             v = dref_round(local_path=d, local_value=value)
                                         if d not in self._dref_cache or self._dref_cache[d] != v:  # cached rounded value
                                             if d != ZULU_TIME_SEC or print_zulu % 120 == 0:
-                                                d2 = self.get_variable(name=d)
-                                                print("DREF", d, self._dref_cache.get(d), " -> ", v, d2.listeners)
+                                                logger.log(SPAM_LEVEL, f"DREF: {d} {self._dref_cache.get(d)} -> {v}")
                                             e = DatarefEvent(
                                                 sim=self,
                                                 dataref=d,
@@ -1661,7 +1663,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
                                 if cref is not None:
                                     c = cref[REST_KW.NAME.value]
                                     v = value
-                                    print("CMD", c, value)
+                                    logger.log(SPAM_LEVEL, f"CMD: {c}={value}")
                                     e = CommandActiveEvent(sim=self, command=c, is_active=value, cascade=True)
                                     self.inc(COCKPITDECKS_INTVAR.COMMAND_ACTIVE_ENQUEUED.value)
                         else:
