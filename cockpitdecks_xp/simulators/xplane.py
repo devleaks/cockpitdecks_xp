@@ -28,9 +28,10 @@ from cockpitdecks.resources.intvariables import COCKPITDECKS_INTVAR
 from ..resources.stationobs import WeatherStationObservable
 from ..resources.daytimeobs import DaytimeObservable
 from ..resources.cmdlsnr import MapCommandObservable
+from .beacon import XPlaneBeacon
 
 logger = logging.getLogger(__name__)
-logger.setLevel(SPAM_LEVEL)  # To see which dataref are requested
+# logger.setLevel(SPAM_LEVEL)  # To see which dataref are requested
 # logger.setLevel(logging.DEBUG)
 
 # #############################################
@@ -694,6 +695,8 @@ class XPlaneREST:
         self.version = ""  # v1, v2, etc.
         self._api = ""  # /v1, /v2, to be appended to URL
         self._capabilities = {}
+        self._beacon = XPlaneBeacon()
+        self._beacon.set_version_control(minversion=XP_MIN_VERSION, maxversion=XP_MAX_VERSION)
 
         self.all_datarefs: Cache | None = None
         self.all_commands: Cache | None = None
@@ -857,6 +860,10 @@ class XPlaneWebSocket(XPlaneREST):
                         self.ws = Client.connect(url)
                         self.reload_caches()
                         logger.info(f"websocket opened at {url}")
+                        if self._beacon.connected:
+                            logger.info(f"XPlane beacon says {'runs locally' if self._beacon.runs_locally() else 'remote'}")
+                        else:
+                            logger.info("XPlane beacon is not connected")
                     else:
                         logger.warning(f"web socket url is none {url}")
             except:
@@ -902,7 +909,7 @@ class XPlaneWebSocket(XPlaneREST):
                                 logger.warning(f"X-Plane version {curr} detected, maximal version is {xpmax}")
                                 logger.warning("Some features in Cockpitdecks may not work properly")
                             else:
-                                logger.info(f"X-Plane version meets current criteria ({xpmin}<= {curr} <={xpmax})")
+                                logger.info(f"X-Plane version meets current version criteria ({xpmin}<= {curr} <={xpmax})")
                         logger.debug("..connected, starting websocket listener..")
                         self.start()
                         # self.inc(COCKPITDECKS_INTVAR.STARTS.value)
@@ -942,6 +949,7 @@ class XPlaneWebSocket(XPlaneREST):
         """
         Starts connect loop.
         """
+        self._beacon.connect()
         if self.should_not_connect is None:
             self.should_not_connect = threading.Event()
             self.connect_thread = threading.Thread(target=self.connect_loop, name=f"{type(self).__name__}::Connection Monitor")
@@ -958,6 +966,7 @@ class XPlaneWebSocket(XPlaneREST):
         """
         if self.should_not_connect is not None:
             logger.debug("disconnecting..")
+            self._beacon.disconnect()
             self.disconnect_websocket()
             self.should_not_connect.set()
             wait = RECONNECT_TIMEOUT
@@ -1532,7 +1541,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
     # Cockpit interface
     #
     def ws_receiver(self):
-        """Read and decode websocket messages and enqueue change events"""
+        """Read and decode websocket messages and enqueue events"""
 
         def dref_round(local_path: str, local_value):
             local_r = self.get_rounding(simulator_variable_name=local_path)
