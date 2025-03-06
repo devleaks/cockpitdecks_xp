@@ -31,7 +31,7 @@ from ..resources.cmdlsnr import MapCommandObservable
 from .beacon import XPlaneBeacon
 
 logger = logging.getLogger(__name__)
-# logger.setLevel(SPAM_LEVEL)  # To see which dataref are requested
+logger.setLevel(SPAM_LEVEL)  # To see which dataref are requested
 # logger.setLevel(logging.DEBUG)
 
 # #############################################
@@ -47,6 +47,8 @@ XP_MIN_VERSION = 121400
 XP_MIN_VERSION_STR = "12.1.4"
 XP_MAX_VERSION = 121499
 XP_MAX_VERSION_STR = "12.1.4"
+
+USE_REST = True
 
 # #############################################
 # PERMANENT DATAREFS
@@ -165,7 +167,7 @@ class Dataref(SimulatorVariable, XPRESTObject):
         url = f"{self.api_url}/datarefs/{self.ident}/value"
         response = requests.get(url)
         data = response.json()
-        logger.debug(f"result: {data}")
+        logger.log(SPAM_LEVEL, f">> GET {self.path}: {url} = {data}")
         if REST_KW.DATA.value in data and type(data[REST_KW.DATA.value]) in [bytes, str]:
             return base64.b64decode(data[REST_KW.DATA.value]).decode("ascii").replace("\u0000", "")
         return data[REST_KW.DATA.value]
@@ -180,7 +182,7 @@ class Dataref(SimulatorVariable, XPRESTObject):
             value = base64.b64encode(value).decode("ascii")
         payload = {REST_KW.IDENT.value: self.ident, REST_KW.DATA.value: value}
         url = f"{self.api_url}/datarefs/{self.ident}/value"
-        logger.log(SPAM_LEVEL, f"writing dataref {self.path}: {url}, {payload}")  # logger.debug
+        logger.log(SPAM_LEVEL, f">>> PATCH {self.path}: {url}, {payload}")  # logger.debug
         response = requests.patch(url, json=payload)
         if response.status_code == 200:
             data = response.json()
@@ -192,10 +194,16 @@ class Dataref(SimulatorVariable, XPRESTObject):
     def ws_write(self) -> int:
         return self.simulator.set_dataref_value(self.name, self.value())
 
+    def _write(self) -> bool:
+        return self.rest_write() if self.use_rest else (self.ws_write() != -1)
+
     def save(self) -> bool:
+        if not self.valid:
+            logger.error(f"dataref {self.path} not valid")
+            return False
         if self._writable:
             if not self.is_internal:
-                return self.ws_write() != -1
+                return self._write()
             else:
                 logger.warning(f"{self.name} is internal variable, not saved to simulator")
         else:
@@ -274,6 +282,14 @@ class XPlaneInstruction(SimulatorInstruction, XPRESTObject):
     def __init__(self, name: str, simulator: XPlane, delay: float = 0.0, condition: str | None = None, button: "Button" = None) -> None:
         SimulatorInstruction.__init__(self, name=name, simulator=simulator, delay=delay, condition=condition)
         XPRESTObject.__init__(self, path=name)
+
+    @property
+    def use_rest(self):
+        return USE_REST and (hasattr(self.simulator, "runs_locally") and not self.simulator.runs_locally())
+
+    @property
+    def is_no_operation(self) -> bool:
+        return self.path is not None and self.path.lower().replace("-", "") in NOT_A_COMMAND
 
     @classmethod
     def new(cls, name: str, simulator: XPlane, instruction_block: dict) -> XPlaneInstruction | None:
@@ -439,11 +455,25 @@ class XPlaneInstruction(SimulatorInstruction, XPRESTObject):
         logger.warning(f"could not find instruction in {instruction_block}")
         return None
 
-    def is_no_operation(self) -> bool:
-        return self.path is not None and self.path.lower().replace("-", "") in NOT_A_COMMAND
+    def request(self, url, **kwargs):
+        method = kwargs.get("method", "get")
+        if "json" in kwargs and method == "post":
+            payload = kwargs.get("json")
+            requests.post(url, json=payload)
+            logger.log(SPAM_LEVEL, f"executing {self.path}: {url}, {payload}")
 
-    def ws_execute(self) -> int:
+    def rest_execute(self) -> bool:  # ABC
+        return False
+
+    def ws_execute(self) -> int:  # ABC
         return -1
+
+    def _execute(self):
+        if self.use_rest:
+            self.rest_execute()
+        else:
+            self.ws_execute()
+        self.clean_timer()
 
 
 # Instructions to simulator
@@ -461,7 +491,7 @@ class Command(XPlaneInstruction):
         return f"{self.name} ({self.path})"
 
     def is_valid(self) -> bool:
-        return not self.is_no_operation()
+        return not self.is_no_operation
 
     def rest_execute(self) -> bool:
         if not self.valid:
@@ -472,6 +502,7 @@ class Command(XPlaneInstruction):
         payload = {REST_KW.IDENT.value: self.ident, REST_KW.DURATION.value: 0.0}
         url = f"{self.simulator.api_url}/command/{self.ident}/activate"
         response = requests.post(url, json=payload)
+        logger.log(SPAM_LEVEL, f">>> POST {url} {payload} {response}")
         data = response.json()
         if response.status_code == 200:
             logger.debug(f"result: {data}")
@@ -481,10 +512,6 @@ class Command(XPlaneInstruction):
 
     def ws_execute(self) -> int:
         return self.simulator.set_command_is_active_with_duration(path=self.path)
-
-    def _execute(self):
-        self.ws_execute()
-        self.clean_timer()
 
 
 class BeginEndCommand(Command):
@@ -505,6 +532,7 @@ class BeginEndCommand(Command):
         payload = {REST_KW.IDENT.value: self.ident, REST_KW.DURATION.value: self.DURATION}
         url = f"{self.simulator.api_url}/command/{self.ident}/activate"
         response = requests.post(url, json=payload)
+        logger.log(SPAM_LEVEL, f">>> POST {url} {payload} {response}")
         data = response.json()
         if response.status_code == 200:
             logger.debug(f"result: {data}")
@@ -518,10 +546,6 @@ class BeginEndCommand(Command):
             return -1
         self.is_on = not self.is_on
         return self.simulator.set_command_is_active_without_duration(path=self.path, active=self.is_on)
-
-    def _execute(self):
-        self.ws_execute()
-        self.clean_timer()
 
 
 class SetDataref(XPlaneInstruction):
@@ -564,8 +588,12 @@ class SetDataref(XPlaneInstruction):
         payload = {REST_KW.DATA.value: self.value}
         url = f"{self.simulator.api_url}/datarefs/{self.ident}/value"
         response = requests.patch(url, json=payload)
+        logger.log(SPAM_LEVEL, f">>> PATCH {url} {payload} {response}")
         if response.status_code == 200:
             return True
+        if response.status_code == 403:
+            logger.warning(f"{self.name}: dataref not writable")
+            return False
         logger.error(f"execute: {response}")
         return False
 
@@ -579,9 +607,6 @@ class SetDataref(XPlaneInstruction):
             logger.debug(f"written local dataref ({self.path}={self.value})")
             return -1
         return self.simulator.set_dataref_value(path=self.path, value=self.value)
-
-    def _execute(self):
-        self.ws_execute()
 
 
 # Events from simulator
@@ -1373,7 +1398,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         self.print_currently_monitored_variables()
         if MONITOR_RESOURCE_USAGE:
             logger.info(
-                f">>>>> monitoring variables++{len(simulator_variables)}/{len(self.datarefs)}/{self._max_datarefs_monitored} {reason if reason is not None else ''}"
+                f">>>>> monitoring variables++{len(simulator_variables)}({len(paths)})/{len(self.datarefs)}/{self._max_datarefs_monitored} {reason if reason is not None else ''}"
             )
 
     def remove_simulator_variables_to_monitor(self, simulator_variables: dict, reason: str | None = None):
@@ -1406,7 +1431,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         self.print_currently_monitored_variables()
         if MONITOR_RESOURCE_USAGE:
             logger.info(
-                f">>>>> monitoring variables--{len(simulator_variables)}/{len(self.datarefs)}/{self._max_datarefs_monitored} {reason if reason is not None else ''}"
+                f">>>>> monitoring variables--{len(simulator_variables)}({len(paths)})/{len(self.datarefs)}/{self._max_datarefs_monitored} {reason if reason is not None else ''}"
             )
 
     def remove_all_simulator_variables_to_monitor(self):

@@ -10,6 +10,7 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 # logger.setLevel(logging.DEBUG)
 
+
 # XPlaneBeacon-specific error classes
 class XPlaneIpNotFound(Exception):
     args = "Could not find any running XPlane instance in network"
