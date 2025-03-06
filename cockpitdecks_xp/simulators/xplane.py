@@ -1366,9 +1366,8 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
 
     def print_currently_monitored_variables(self, with_value: bool = True):
         if with_value:
-            for d in self.datarefs:
-                dref = self.get_variable(d)
-                logger.log(SPAM_LEVEL, f"{dref.name}={dref.value()}")
+            values = [f"{d}={self.get_variable(d).value()}" for d in self.datarefs]
+            logger.log(SPAM_LEVEL, f">>>>> currently monitored variables:\n{'\n'.join(sorted(values))}")
             return
         logger.log(SPAM_LEVEL, f">>>>> currently monitored variables:\n{'\n'.join(sorted(self.datarefs))}")
 
