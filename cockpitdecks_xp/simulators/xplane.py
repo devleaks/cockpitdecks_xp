@@ -34,6 +34,15 @@ logger = logging.getLogger(__name__)
 logger.setLevel(SPAM_LEVEL)  # To see which dataref are requested
 # logger.setLevel(logging.DEBUG)
 
+WEBAPILOGFILE = "webapi.log"
+webapi_logger = logging.getLogger("webapi")
+if WEBAPILOGFILE is not None:
+    formatter = logging.Formatter('"%(asctime)s" %(message)s')
+    handler = logging.FileHandler(WEBAPILOGFILE, mode="w")
+    handler.setFormatter(formatter)
+    webapi_logger.addHandler(handler)
+    webapi_logger.propagate = False
+
 # #############################################
 # CONFIGURATION AND OPTIONS
 #
@@ -167,7 +176,7 @@ class Dataref(SimulatorVariable, XPRESTObject):
         url = f"{self.api_url}/datarefs/{self.ident}/value"
         response = requests.get(url)
         data = response.json()
-        logger.log(SPAM_LEVEL, f">> GET {self.path}: {url} = {data}")
+        webapi_logger.info(f"GET {self.path}: {url} = {data}")
         if REST_KW.DATA.value in data and type(data[REST_KW.DATA.value]) in [bytes, str]:
             return base64.b64decode(data[REST_KW.DATA.value]).decode("ascii").replace("\u0000", "")
         return data[REST_KW.DATA.value]
@@ -182,7 +191,7 @@ class Dataref(SimulatorVariable, XPRESTObject):
             value = base64.b64encode(value).decode("ascii")
         payload = {REST_KW.IDENT.value: self.ident, REST_KW.DATA.value: value}
         url = f"{self.api_url}/datarefs/{self.ident}/value"
-        logger.log(SPAM_LEVEL, f">>> PATCH {self.path}: {url}, {payload}")  # logger.debug
+        webapi_logger.info(f"PATCH {self.path}: {url}, {payload}")  # logger.debug
         response = requests.patch(url, json=payload)
         if response.status_code == 200:
             data = response.json()
@@ -460,7 +469,7 @@ class XPlaneInstruction(SimulatorInstruction, XPRESTObject):
         if "json" in kwargs and method == "post":
             payload = kwargs.get("json")
             requests.post(url, json=payload)
-            logger.log(SPAM_LEVEL, f"executing {self.path}: {url}, {payload}")
+            webapi_logger.info(f"executing {self.path}: {url}, {payload}")
 
     def rest_execute(self) -> bool:  # ABC
         return False
@@ -502,7 +511,7 @@ class Command(XPlaneInstruction):
         payload = {REST_KW.IDENT.value: self.ident, REST_KW.DURATION.value: 0.0}
         url = f"{self.simulator.api_url}/command/{self.ident}/activate"
         response = requests.post(url, json=payload)
-        logger.log(SPAM_LEVEL, f">>> POST {url} {payload} {response}")
+        webapi_logger.info(f"POST {url} {payload} {response}")
         data = response.json()
         if response.status_code == 200:
             logger.debug(f"result: {data}")
@@ -532,7 +541,7 @@ class BeginEndCommand(Command):
         payload = {REST_KW.IDENT.value: self.ident, REST_KW.DURATION.value: self.DURATION}
         url = f"{self.simulator.api_url}/command/{self.ident}/activate"
         response = requests.post(url, json=payload)
-        logger.log(SPAM_LEVEL, f">>> POST {url} {payload} {response}")
+        webapi_logger.info(f"POST {url} {payload} {response}")
         data = response.json()
         if response.status_code == 200:
             logger.debug(f"result: {data}")
@@ -588,7 +597,7 @@ class SetDataref(XPlaneInstruction):
         payload = {REST_KW.DATA.value: self.value}
         url = f"{self.simulator.api_url}/datarefs/{self.ident}/value"
         response = requests.patch(url, json=payload)
-        logger.log(SPAM_LEVEL, f">>> PATCH {url} {payload} {response}")
+        webapi_logger.info(f"PATCH {url} {payload} {response}")
         if response.status_code == 200:
             return True
         if response.status_code == 403:
@@ -705,6 +714,12 @@ class Cache:
     def save(self, filename):
         with open(filename, "w") as fp:
             json.dump(self._data, fp)
+
+    def equiv(self, ident) -> str | None:
+        r = self._ids.get(ident)
+        if r is not None:
+            return f"{ident}({r[REST_KW.NAME.value]})"
+        return None
 
 
 class XPlaneREST:
@@ -1019,7 +1034,7 @@ class XPlaneWebSocket(XPlaneREST):
                 payload[REST_KW.REQID.value] = req_id
                 self._requests[req_id] = None
                 self.ws.send(json.dumps(payload))
-                logger.log(SPAM_LEVEL, f">>> sent {payload}")
+                webapi_logger.info(f">>SENT {payload}")
                 return req_id
             else:
                 logger.warning("no payload")
@@ -1459,7 +1474,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
             self.register_bulk_dataref_value_event(paths=paths, on=True)
             self.datarefs = self.datarefs | paths
             self._max_datarefs_monitored = max(self._max_datarefs_monitored, len(self.datarefs))
-            logger.log(SPAM_LEVEL, f"added {paths}")
+            logger.log(SPAM_LEVEL, f">>>>> add_permanently_monitored_simulator_variables: added {paths}")
         logger.debug("no simulator variable to monitor")
 
     #
@@ -1559,7 +1574,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         self.register_bulk_command_is_active_event(paths=paths, on=True)
         self.cmdevents = self.cmdevents | paths
         self._max_events_monitored = max(self._max_events_monitored, len(self.cmdevents))
-        logger.log(SPAM_LEVEL, f"added {paths}")
+        logger.log(SPAM_LEVEL, f">>>>> add_all_simulator_events_to_monitor: added {paths}")
 
     # ################################
     # Cockpit interface
@@ -1611,7 +1626,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
 
                     if resp_type == REST_RESPONSE.RESULT.value:
 
-                        logger.log(SPAM_LEVEL, f"<<< received {data}")
+                        webapi_logger.info(f"<<RCV  {data}")
                         req_id = data.get(REST_KW.REQID.value)
                         if req_id is not None:
                             self._requests[req_id] = data[REST_KW.SUCCESS.value]
@@ -1651,7 +1666,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
                                             d1 = f"{d}[{idx}]"
                                             v = dref_round(local_path=d1, local_value=v1)
                                             if d1 not in self._dref_cache or self._dref_cache[d1] != v:  # cached rounded value
-                                                logger.log(SPAM_LEVEL, f"DREF ARRAY: {d} {idx} {self._dref_cache.get(d1)} -> {v}")
+                                                webapi_logger.info(f"DREF ARRAY: {d} {idx} {self._dref_cache.get(d1)} -> {v}")
                                                 e = DatarefEvent(
                                                     sim=self,
                                                     dataref=d1,
@@ -1674,7 +1689,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
                                             v = dref_round(local_path=d, local_value=value)
                                         if d not in self._dref_cache or self._dref_cache[d] != v:  # cached rounded value
                                             if d != ZULU_TIME_SEC or print_zulu % 120 == 0:
-                                                logger.log(SPAM_LEVEL, f"DREF: {d} {self._dref_cache.get(d)} -> {v}")
+                                                webapi_logger.info(f"DREF: {d} {self._dref_cache.get(d)} -> {v}")
                                             e = DatarefEvent(
                                                 sim=self,
                                                 dataref=d,
@@ -1696,7 +1711,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
                                 if cref is not None:
                                     c = cref[REST_KW.NAME.value]
                                     v = value
-                                    logger.log(SPAM_LEVEL, f"CMD: {c}={value}")
+                                    webapi_logger.info(f"CMD : {c}={value}")
                                     e = CommandActiveEvent(sim=self, command=c, is_active=value, cascade=True)
                                     self.inc(COCKPITDECKS_INTVAR.COMMAND_ACTIVE_ENQUEUED.value)
                         else:
