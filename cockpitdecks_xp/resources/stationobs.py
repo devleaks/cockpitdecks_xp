@@ -18,7 +18,6 @@ logger = logging.getLogger(__name__)
 
 LATITUDE = "sim/flightmodel/position/latitude"
 LONGITUDE = "sim/flightmodel/position/longitude"
-COORDINATES = {LATITUDE, LONGITUDE}
 
 
 class WeatherStationObservable(Observable):
@@ -32,7 +31,6 @@ class WeatherStationObservable(Observable):
     def __init__(self, simulator: Simulator):
         wso_config = {
             "name": type(self).__name__,
-            "multi-datarefs": [LATITUDE, LONGITUDE],
             "actions": [{}],  # Action is specific, in our case: (lat, lon) -> weather station icao
         }
         super().__init__(config=wso_config, simulator=simulator)
@@ -46,13 +44,13 @@ class WeatherStationObservable(Observable):
         logger.debug(f"set initial station to {self.DEFAULT_STATION}")
 
     def get_variables(self) -> set:
-        return COORDINATES
+        return {LATITUDE, LONGITUDE}
 
     def simulator_variable_changed(self, data: SimulatorVariable):
         if (datetime.now() - self._last_checked).seconds < self.check_time:
             return  # too early to change
 
-        if data.name not in COORDINATES:
+        if data.name not in self.get_variables():
             return  # not for me, should never happen
 
         lat = self.sim.get_simulator_variable_value(LATITUDE)
@@ -65,7 +63,7 @@ class WeatherStationObservable(Observable):
 
         self._last_checked = datetime.now()
         (nearest, coords) = Station.nearest(lat=lat, lon=lon, max_coord_distance=150000)
-        if nearest.icao != self._value.value():
+        if nearest.icao != self._value.value:
             logger.info(f"changed weather station to {nearest.icao} ({round(lat, 6)}, {round(lon, 6)})")
             self.value = nearest.icao
             self._set_dataref.update_value(new_value=nearest.icao, cascade=True)

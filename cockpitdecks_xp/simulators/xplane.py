@@ -136,6 +136,8 @@ class XPRESTObject:
         return self.config[REST_KW.VALUE_TYPE.value]
 
     def init(self, cache):
+        if cache is None:
+            return
         self.config = cache.get(self.path)
         self.api = None
         self.valid = False
@@ -166,7 +168,7 @@ class Dataref(SimulatorVariable, XPRESTObject):
             self.index = int(self.name[self.name.find("[") + 1 : self.name.find("]")])
 
     def __str__(self) -> str:
-        return f"{self.path}={self.value()}"
+        return f"{self.path}={self.value}"
 
     @property
     def rest_value(self):
@@ -185,7 +187,7 @@ class Dataref(SimulatorVariable, XPRESTObject):
         if not self.valid:
             logger.error(f"dataref {self.path} not valid")
             return False
-        value = self.value()
+        value = self.value
         if self.value_type == "data":
             value = str(value).encode("ascii")
             value = base64.b64encode(value).decode("ascii")
@@ -201,7 +203,7 @@ class Dataref(SimulatorVariable, XPRESTObject):
         return False
 
     def ws_write(self) -> int:
-        return self.simulator.set_dataref_value(self.name, self.value())
+        return self.simulator.set_dataref_value(self.name, self.value)
 
     def _write(self) -> bool:
         return self.rest_write() if self.use_rest else (self.ws_write() != -1)
@@ -577,7 +579,7 @@ class SetDataref(XPlaneInstruction):
     @property
     def value(self):
         if self.formula is not None:
-            return self.formula.value()
+            return self.formula.value
         return self._value
 
     @value.setter
@@ -1381,7 +1383,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
 
     def print_currently_monitored_variables(self, with_value: bool = True):
         if with_value:
-            values = [f"{d}={self.get_variable(d).value()}" for d in self.datarefs]
+            values = [f"{d}={self.get_variable(d).value}" for d in self.datarefs]
             logger.log(SPAM_LEVEL, f">>>>> currently monitored variables:\n{'\n'.join(sorted(values))}")
             return
         logger.log(SPAM_LEVEL, f">>>>> currently monitored variables:\n{'\n'.join(sorted(self.datarefs))}")
