@@ -811,10 +811,11 @@ class XPlaneREST:
         if connected:
             logger.info("X-Plane beacon connected")
             if self._beacon.connected:
-                self.host = self._beacon.beacon_data[BEACON_DATA_KW.IP.value]
                 if self._beacon.runs_locally():
+                    self.host = "127.0.0.1"
                     self.port = 8086
                 else:
+                    self.host = self._beacon.beacon_data[BEACON_DATA_KW.IP.value]
                     self.port = 8080
                 xp_version = self._beacon.beacon_data.get(BEACON_DATA_KW.XPVERSION.value)
                 if xp_version is not None:
