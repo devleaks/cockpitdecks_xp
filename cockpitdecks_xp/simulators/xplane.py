@@ -765,6 +765,7 @@ class XPlaneREST:
          - X-Plane version before 12.1.4,
          - X-Plane is not running
         """
+        response = None
         try:
             # Relies on the fact that first version is always provided.
             # Later verion offer alternative ot detect API
@@ -772,7 +773,7 @@ class XPlaneREST:
             if response.status_code == 200:
                 return True
         except:
-            logger.error("api unreachable, may be X-Plane is not running")
+            logger.error(f"api unreachable, may be X-Plane is not running ({response})")
         return False
 
     def capabilities(self) -> dict:
@@ -904,6 +905,8 @@ class XPlaneWebSocket(XPlaneREST):
                         logger.info(f"websocket opened at {url}")
                         if self._beacon.connected:
                             logger.info(f"XPlane beacon says {'runs locally' if self._beacon.runs_locally() else 'remote'}")
+                            self.host = self._beacon.beacon_data["IP"]
+                            logger.info(f"XPlane API at {self.api_url}")
                         else:
                             logger.info("XPlane beacon is not connected")
                     else:
