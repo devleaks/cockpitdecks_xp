@@ -171,10 +171,16 @@ class Dataref(SimulatorVariable, XPRESTObject):
         return f"{self.path}={self.value}"
 
     @property
+    def use_rest(self):
+        return USE_REST and (hasattr(self.simulator, "runs_locally") and not self.simulator.runs_locally())
+
+    @property
     def rest_value(self):
         if not self.valid:
-            logger.error(f"dataref {self.path} not valid")
-            return None
+            self.init(cache=self.simulator.all_datarefs)
+            if not self.valid:
+                logger.error(f"dataref {self.path} not valid")
+                return False
         url = f"{self.api_url}/datarefs/{self.ident}/value"
         response = requests.get(url)
         data = response.json()
@@ -185,14 +191,16 @@ class Dataref(SimulatorVariable, XPRESTObject):
 
     def rest_write(self) -> bool:
         if not self.valid:
-            logger.error(f"dataref {self.path} not valid")
-            return False
+            self.init(cache=self.simulator.all_datarefs)
+            if not self.valid:
+                logger.error(f"dataref {self.path} not valid")
+                return False
         value = self.value
         if self.value_type == "data":
             value = str(value).encode("ascii")
             value = base64.b64encode(value).decode("ascii")
         payload = {REST_KW.IDENT.value: self.ident, REST_KW.DATA.value: value}
-        url = f"{self.api_url}/datarefs/{self.ident}/value"
+        url = f"{self.simulator.api_url}/datarefs/{self.ident}/value"
         webapi_logger.info(f"PATCH {self.path}: {url}, {payload}")  # logger.debug
         response = requests.patch(url, json=payload)
         if response.status_code == 200:
@@ -210,8 +218,10 @@ class Dataref(SimulatorVariable, XPRESTObject):
 
     def save(self) -> bool:
         if not self.valid:
-            logger.error(f"dataref {self.path} not valid")
-            return False
+            self.init(cache=self.simulator.all_datarefs)
+            if not self.valid:
+                logger.error(f"dataref {self.path} not valid")
+                return False
         if self._writable:
             if not self.is_internal:
                 return self._write()
@@ -765,15 +775,18 @@ class XPlaneREST:
          - X-Plane version before 12.1.4,
          - X-Plane is not running
         """
+        CHECK_API_URL = f"http://{self.host}:{self.port}/api/v1/datarefs/count"
         response = None
         try:
             # Relies on the fact that first version is always provided.
             # Later verion offer alternative ot detect API
-            response = requests.get(self.api_url + "/v1/datarefs/count")
+            response = requests.get(CHECK_API_URL)
             if response.status_code == 200:
                 return True
+        except requests.exceptions.ConnectionError:
+            logger.error(f"api unreachable, may be X-Plane is not running")
         except:
-            logger.error(f"api unreachable, may be X-Plane is not running ({response})")
+            logger.error(f"api unreachable, may be X-Plane is not running", exc_info=True)
         return False
 
     def capabilities(self) -> dict:
@@ -905,10 +918,14 @@ class XPlaneWebSocket(XPlaneREST):
                         logger.info(f"websocket opened at {url}")
                         if self._beacon.connected:
                             logger.info(f"XPlane beacon says {'runs locally' if self._beacon.runs_locally() else 'remote'}")
-                            self.host = self._beacon.beacon_data["IP"]
-                            logger.info(f"XPlane API at {self.api_url}")
+                            # self.host = self._beacon.beacon_data["IP"]
+                            # if self._beacon.runs_locally():
+                            #     self.port = 8086
+                            # else:
+                            #     self.port = 8080
+                            # logger.info(f"XPlane API at {self.api_url}")
                         else:
-                            logger.info("XPlane beacon is not connected")
+                            logger.info("XPlane UDP beacon is not connected")
                     else:
                         logger.warning(f"web socket url is none {url}")
             except:
@@ -1065,12 +1082,14 @@ class XPlaneWebSocket(XPlaneREST):
         if INDICES not in dref:
             dref[INDICES] = set()
         dref[INDICES].add(i)
+        webapi_logger.info(f"REG {dref[REST_KW.NAME.value]}: {i} ({dref[INDICES]})")
 
     def remove_index(self, dref, i):
         if INDICES not in dref:
             logger.warning(f"{dref} has no index list")
             return
         dref[INDICES].remove(i)
+        webapi_logger.info(f"DEREG {dref[REST_KW.NAME.value]}: {i} ({dref[INDICES]})")
 
     def set_dataref_value(self, path, value) -> int:
         if value is None:
@@ -1114,7 +1133,6 @@ class XPlaneWebSocket(XPlaneREST):
                 continue
             if split:
                 drefs.append({REST_KW.IDENT.value: dref[REST_KW.IDENT.value], REST_KW.INDEX.value: index})
-                self.append_index(dref, index)
                 if on:
                     self.append_index(dref, index)
                 else:
@@ -1385,6 +1403,8 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         logger.debug("done")
 
     def print_currently_monitored_variables(self, with_value: bool = True):
+        logger.log(SPAM_LEVEL, ">>>>> currently monitored variables is disabled")
+        return
         if with_value:
             values = [f"{d}={self.get_variable(d).value}" for d in self.datarefs]
             logger.log(SPAM_LEVEL, f">>>>> currently monitored variables:\n{'\n'.join(sorted(values))}")
@@ -1595,24 +1615,25 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         logger.debug("starting websocket listener..")
         total_reads = 0
         print_zulu = 0
-        last_read_ts = datetime.now()
+        start_time = datetime.now()
+        last_read_ts = start_time
         total_read_time = 0.0
         self.set_internal_variable(name=COCKPITDECKS_INTVAR.INTDREF_CONNECTION_STATUS.value, value=3, cascade=True)
         while not self.ws_event.is_set():
             try:
                 message = self.ws.receive(timeout=RECEIVE_TIMEOUT)
                 if message is None:
-                    logger.log(SPAM_LEVEL, f"timeout, no message at {datetime.now()}")
+                    logger.log(SPAM_LEVEL, "waiting for data from simulator..") # at {datetime.now()}")
                     continue
 
+                now = datetime.now()
                 if total_reads == 0:
-                    logger.log(SPAM_LEVEL, f"first message at {datetime.now()}")
+                    logger.log(SPAM_LEVEL, f"..first message at {now} ({round((now - start_time).seconds, 2)} secs.)")
                 # Estimate response time
                 self.set_internal_variable(name=COCKPITDECKS_INTVAR.INTDREF_CONNECTION_STATUS.value, value=4, cascade=True)
 
                 self.inc(COCKPITDECKS_INTVAR.UDP_READS.value)
                 total_reads = total_reads + 1
-                now = datetime.now()
                 delta = now - last_read_ts
                 self.set_internal_variable(
                     name=COCKPITDECKS_INTVAR.LAST_READ.value,
@@ -1667,6 +1688,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
                                         # we must check each individual value...
                                         if INDICES not in dref or len(value) != len(dref[INDICES]):
                                             logger.warning(f"dataref array {d} size mismatch ({len(value)}/{len(dref[INDICES])})")
+                                            logger.warning(f"dataref array {d}: value: {value}, indices: {dref[INDICES]})")
                                         for v1, idx, cnt in zip(value, dref[INDICES], range(len(value))):
                                             d1 = f"{d}[{idx}]"
                                             v = dref_round(local_path=d1, local_value=v1)
