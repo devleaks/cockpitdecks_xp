@@ -20,7 +20,7 @@ class XPRealWeatherMetarIcon(WeatherBaseIcon):
         icao = self.weather.get("station", self.DEFAULT_STATION)
         self.width = self.weather.get("width", 21)
         self.set_label(icao)
-        self.weather_data = XPRealWeatherData(name=button.button_name(), simulator=button.sim, weather_type=WEATHER_LOCATION.REGION.value)
+        self.weather_data = XPRealWeatherData(name=button.button_name, simulator=button.sim, weather_type=WEATHER_LOCATION.REGION.value)
         self.weather_data.add_listener(self)
 
     # #############################################
