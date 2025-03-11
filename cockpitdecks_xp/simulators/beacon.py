@@ -5,6 +5,8 @@ import ipaddress
 import struct
 import binascii
 import platform
+from typing import Callable
+from enum import Enum
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -33,6 +35,14 @@ def get_ip(s) -> str:
         return ipaddress.ip_address(socket.gethostbyname(s))
 
 
+class BEACON_DATA_KW(Enum):
+    IP = "IP"
+    PORT = "Port"
+    HOSTNAME = "hostname"
+    XPVERSION = "XPlaneVersion"
+    XPROLE = "role"
+
+
 class XPlaneBeacon:
     """
     Get data from XPlane via network.
@@ -58,10 +68,11 @@ class XPlaneBeacon:
         self._already_warned = 0
         self.min_version = 0
         self.max_version = 0
+        self._callback = None
 
     @property
     def connected(self):
-        res = "IP" in self.beacon_data.keys()
+        res = BEACON_DATA_KW.IP.value in self.beacon_data.keys()
         if not res and not self._already_warned > self.MAX_WARNING:
             if self._already_warned == self.MAX_WARNING:
                 logger.warning("no connection (last warning)")
@@ -69,6 +80,13 @@ class XPlaneBeacon:
                 logger.warning("no connection")
             self._already_warned = self._already_warned + 1
         return res
+
+    def set_callback(self, callback: Callable | None = None):
+        self._callback = callback
+
+    def callback(self, connected):
+        if self._callback is not None:
+            self._callback(connected)
 
     def FindIp(self):
         """
@@ -137,11 +155,11 @@ class XPlaneBeacon:
                 hostname = packet[21:-1]  # the hostname of the computer
                 hostname = hostname[0 : hostname.find(0)]
                 if beacon_major_version == 1 and beacon_minor_version <= 2 and application_host_id == 1:
-                    self.beacon_data["IP"] = sender[0]
-                    self.beacon_data["Port"] = port
-                    self.beacon_data["hostname"] = hostname.decode()
-                    self.beacon_data["XPlaneVersion"] = xplane_version_number
-                    self.beacon_data["role"] = role
+                    self.beacon_data[BEACON_DATA_KW.IP.value] = sender[0]
+                    self.beacon_data[BEACON_DATA_KW.PORT.value] = port
+                    self.beacon_data[BEACON_DATA_KW.HOSTNAME.value] = hostname.decode()
+                    self.beacon_data[BEACON_DATA_KW.XPVERSION.value] = xplane_version_number
+                    self.beacon_data[BEACON_DATA_KW.XPROLE.value] = role
                     logger.info(f"XPlane Beacon Version: {beacon_major_version}.{beacon_minor_version}.{application_host_id}")
                 else:
                     logger.warning(f"XPlane Beacon Version not supported: {beacon_major_version}.{beacon_minor_version}.{application_host_id}")
@@ -169,8 +187,8 @@ class XPlaneBeacon:
                     if self.connected:
                         self._already_warned = 0
                         logger.info(f"beacon: {self.beacon_data}")
-                        if "XPlaneVersion" in self.beacon_data:
-                            curr = self.beacon_data["XPlaneVersion"]
+                        if BEACON_DATA_KW.XPVERSION.value in self.beacon_data:
+                            curr = self.beacon_data[BEACON_DATA_KW.XPVERSION.value]
                             if curr < self.min_version:
                                 logger.warning(f"X-Plane version {curr} detected, minimal version is {self.min_version}")
                                 logger.warning("Some features in Cockpitdecks may not work properly")
@@ -178,18 +196,21 @@ class XPlaneBeacon:
                                 logger.warning(f"X-Plane version {curr} detected, maximal version is {self.max_version}")
                                 logger.warning("Some features in Cockpitdecks may not work properly")
                             else:
-                                logger.debug(f"X-Plane version meets current criteria ({self.min_version}<= {curr} <={self.max_version})")
+                                logger.debug(f"X-Plane version ok ({self.min_version}<= {curr} <={self.max_version})")
                                 logger.info("connected")
-                                logger.info(f"XPlane beacon says {'runs locally' if self.runs_locally() else 'remote'}")
+                                logger.info(f"XPlane beacon {'runs locally' if self.runs_locally() else 'is remote'}")
+                        self.callback(True)  # connected
                 except XPlaneVersionNotSupported:
                     self.beacon_data = {}
                     logger.error("..X-Plane Version not supported..")
+                    self.callback(False)  # disconnected
                 except XPlaneIpNotFound:
                     logger.warning("disconnected")
                     self.beacon_data = {}
                     if cnt % XPlaneBeacon.WARN_FREQ == 0:
                         logger.error(f"..X-Plane instance not found on local network.. ({datetime.now().strftime('%H:%M:%S')})")
                     cnt = cnt + 1
+                    self.callback(False)  # disconnected
                 if not self.connected:
                     self.should_not_connect.wait(XPlaneBeacon.RECONNECT_TIMEOUT)
                     logger.debug("..trying..")
@@ -241,7 +262,7 @@ class XPlaneBeacon:
 
     def runs_locally(self) -> bool:
         if self.connected:
-            return ipaddress.ip_address(self.local_ip) == ipaddress.ip_address(self.beacon_data["IP"])
+            return ipaddress.ip_address(self.local_ip) == ipaddress.ip_address(self.beacon_data[BEACON_DATA_KW.IP.value])
         return False
 
 

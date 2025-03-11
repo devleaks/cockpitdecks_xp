@@ -17,6 +17,8 @@ class MapCommandObservable(Observable):
     if necessary.
     """
 
+    OBSERVABLE_NAME = "map-command"
+
     def __init__(self, simulator: Simulator):
         wso_config = {
             "name": type(self).__name__,

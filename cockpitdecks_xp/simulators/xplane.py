@@ -8,6 +8,7 @@ import threading
 import logging
 import json
 import base64
+from abc import ABC, abstractmethod
 from enum import Enum
 from datetime import datetime, timedelta, timezone
 
@@ -28,7 +29,7 @@ from cockpitdecks.resources.intvariables import COCKPITDECKS_INTVAR
 from ..resources.stationobs import WeatherStationObservable
 from ..resources.daytimeobs import DaytimeObservable
 from ..resources.cmdlsnr import MapCommandObservable
-from .beacon import XPlaneBeacon
+from .beacon import XPlaneBeacon, BEACON_DATA_KW
 
 logger = logging.getLogger(__name__)
 logger.setLevel(SPAM_LEVEL)  # To see which dataref are requested
@@ -57,6 +58,9 @@ XP_MIN_VERSION_STR = "12.1.4"
 XP_MAX_VERSION = 121499
 XP_MAX_VERSION_STR = "12.1.4"
 
+# /api/capabiltiies introduced in /api/v2. Here is a default one for v1.
+DEFAULT_CAPABILITIES = {"api": {"versions": ["v1"]}, "x-plane": {"version": "12.1.1"}}
+
 USE_REST = True
 
 # #############################################
@@ -66,9 +70,9 @@ USE_REST = True
 #
 ZULU_TIME_SEC = "sim/time/zulu_time_sec"
 DATETIME_DATAREFS = [
+    ZULU_TIME_SEC,
     "sim/time/local_date_days",
     "sim/time/local_time_sec",
-    ZULU_TIME_SEC,
     "sim/time/use_system_time",
 ]
 REPLAY_DATAREFS = [
@@ -741,14 +745,25 @@ class XPlaneREST:
     See https://developer.x-plane.com/article/x-plane-web-api/#REST_API.
     """
 
-    def __init__(self, host: str, port: int) -> None:
+    def __init__(self, host: str, port: int, api: str, api_version: str) -> None:
         self.host = host
         self.port = port
-        self.version = ""  # v1, v2, etc.
-        self._api = ""  # /v1, /v2, to be appended to URL
+        self._api_root_path = api
+        if not self._api_root_path.startswith("/"):
+            self._api_root_path = "/" + api
+        self._api_version = api_version  # /v1, /v2, to be appended to URL
+        if not self._api_version.startswith("/"):
+            self._api_version = "/" + self._api_version
+        self._first_try = True
+
+        self.version = api_version  # v1, v2, etc.
+        if self.version.startswith("/"):
+            self.version = self.version[1:]
+
         self._capabilities = {}
         self._beacon = XPlaneBeacon()
         self._beacon.set_version_control(minversion=XP_MIN_VERSION, maxversion=XP_MAX_VERSION)
+        self._beacon.set_callback(self.beacon_callback)
 
         self.all_datarefs: Cache | None = None
         self.all_commands: Cache | None = None
@@ -758,7 +773,7 @@ class XPlaneREST:
     # to overwrite @property definition
     def api_url(self) -> str:
         """URL for the REST API."""
-        return f"http://{self.host}:{self.port}/api{self._api}"
+        return f"http://{self.host}:{self.port}{self._api_root_path}{self._api_version}"
 
     @property
     def ws_url(self) -> str:
@@ -777,6 +792,9 @@ class XPlaneREST:
         """
         CHECK_API_URL = f"http://{self.host}:{self.port}/api/v1/datarefs/count"
         response = None
+        if self._first_try:
+            logger.info(f"trying to connect to {CHECK_API_URL}..")
+            self._first_try = False
         try:
             # Relies on the fact that first version is always provided.
             # Later verion offer alternative ot detect API
@@ -789,22 +807,52 @@ class XPlaneREST:
             logger.error(f"api unreachable, may be X-Plane is not running", exc_info=True)
         return False
 
+    def beacon_callback(self, connected: bool):
+        if connected:
+            logger.info("X-Plane beacon connected")
+            if self._beacon.connected:
+                self.host = self._beacon.beacon_data[BEACON_DATA_KW.IP.value]
+                if self._beacon.runs_locally():
+                    self.port = 8086
+                else:
+                    self.port = 8080
+                xp_version = self._beacon.beacon_data.get(BEACON_DATA_KW.XPVERSION.value)
+                if xp_version is not None:
+                    if self._beacon.beacon_data[BEACON_DATA_KW.XPVERSION.value] >= 121400:
+                        self._api_version = "/v2"
+                        self._first_try = True
+                        logger.info(f"XPlane API at {self.api_url} from UDP beacon data")
+                    elif self._beacon.beacon_data[BEACON_DATA_KW.XPVERSION.value] >= 121100:
+                        self._api_version = "/v1"
+                        self._first_try = True
+                        logger.info(f"XPlane API at {self.api_url} from UDP beacon data")
+                    else:
+                        logger.warning(f"could not set API version from {xp_version} ({self._beacon.beacon_data})")
+                else:
+                    logger.warning(f"could not get X-Plane version from {self._beacon.beacon_data}")
+            else:
+                logger.info("XPlane UDP beacon is not connected")
+        else:
+            logger.warning("X-Plane beacon disconnected")
+
     def capabilities(self) -> dict:
         # Guess capabilties and caches it
         if len(self._capabilities) > 0:
             return self._capabilities
         try:
-            response = requests.get(self.api_url + "/capabilities")
+            CAPABILITIES_API_URL = f"http://{self.host}:{self.port}/api/capabilities"  # independent from version
+            response = requests.get(CAPABILITIES_API_URL)
             if response.status_code == 200:  # We have version 12.1.4 or above
                 self._capabilities = response.json()
                 logger.debug(f"capabilities: {self._capabilities}")
                 return self._capabilities
+            logger.info(f"capabilities at {self.api_url + '/capabilities'}: response={response.status_code}")
             response = requests.get(self.api_url + "/v1/datarefs/count")
             if response.status_code == 200:  # OK, /api/v1 exists, we use it, we have version 12.1.1 or above
-                self._capabilities = {"api": {"versions": ["v1"]}, "x-plane": {"version": "12"}}
+                self._capabilities = DEFAULT_CAPABILITIES
                 logger.debug(f"capabilities: {self._capabilities}")
                 return self._capabilities
-            logger.error(f"capabilities: response={response.status_code}")
+            logger.error(f"capabilities at {self.api_url + '/datarefs/count'}: response={response.status_code}")
         except:
             logger.error("capabilities", exc_info=True)
         return self._capabilities
@@ -817,35 +865,34 @@ class XPlaneREST:
         return a.get("version")
 
     def set_api(self, api: str | None = None):
-        api_details = self._capabilities.get("api")
+        capabilities = self.capabilities()
+        api_details = capabilities.get("api")
         if api_details is not None:
             api_versions = api_details.get("versions")
             if api is None:
                 if api_versions is None:
                     logger.error("cannot determine api, api not set")
                     return
-                api = api_versions[-1]  # takes the latest one, hoping it is the latest in time...
-                logger.error(f"selected api {api}")
+                api = sorted(api_versions)[-1]  # takes the latest one, hoping it is the latest in time...
+                logger.info(f"selected latest api {api} ({sorted(api_versions)})")
             if api in api_versions:
                 self.version = api
-                self._api = "/" + api
+                self._api_version = "/" + api
                 logger.info(f"set api {api}, xp {self.xp_version}")
             else:
                 logger.warning(f"no api {api} in {api_versions}")
             return
-        logger.warning(f"could not check api {api} in {self._capabilities}")
+        logger.warning(f"could not check api {api} in {capabilities}")
 
     def reload_caches(self):
         self.all_datarefs = Cache(self)
         self.all_datarefs.load("/datarefs")
         # self.all_datarefs.save("datarefs.json")
+        self.all_commands = Cache(self)
         if self.version == "v2":  # >
-            self.all_commands = Cache(self)
             self.all_commands.load("/commands")
             # self.all_commands.save("commands.json")
-        else:
-            self.all_commands = {}
-        logger.info(f"dataref cache ({len(self.all_datarefs._data)}) and command cache ({len(self.all_datarefs._data)}) reloaded {'*-><-'*15}")
+        logger.info(f"dataref cache ({len(self.all_datarefs._data)}) and command cache ({len(self.all_commands._data)}) reloaded {'*-><-'*15}")
 
     def get_dataref_info_by_name(self, path: str):
         return self.all_datarefs.get_by_name(path) if self.all_datarefs is not None else None
@@ -863,7 +910,7 @@ class XPlaneREST:
 # #############################################
 # WEBSOCKET API
 #
-class XPlaneWebSocket(XPlaneREST):
+class XPlaneWebSocket(XPlaneREST, ABC):
     """Utility routines specific to WebSocket API
 
     See https://developer.x-plane.com/article/x-plane-web-api/#Websockets_API.
@@ -871,9 +918,9 @@ class XPlaneWebSocket(XPlaneREST):
 
     MAX_WARNING = 5  # number of times it reports it cannot connect
 
-    def __init__(self, host: str, port: int):
+    def __init__(self, host: str, port: int, api: str, api_version: str):
         # Open a UDP Socket to receive on Port 49000
-        XPlaneREST.__init__(self, host=host, port=port)
+        XPlaneREST.__init__(self, host=host, port=port, api=api, api_version=api_version)
         hostname = socket.gethostname()
         self.local_ip = socket.gethostbyname(hostname)
 
@@ -909,23 +956,12 @@ class XPlaneWebSocket(XPlaneREST):
         if self.ws is None:
             try:
                 if self.api_is_available:
-                    self.capabilities()
-                    self.set_api("v2")
+                    self.set_api()  # attempt to get latest one
                     url = self.ws_url
                     if url is not None:
                         self.ws = Client.connect(url)
                         self.reload_caches()
                         logger.info(f"websocket opened at {url}")
-                        if self._beacon.connected:
-                            logger.info(f"XPlane beacon says {'runs locally' if self._beacon.runs_locally() else 'remote'}")
-                            # self.host = self._beacon.beacon_data["IP"]
-                            # if self._beacon.runs_locally():
-                            #     self.port = 8086
-                            # else:
-                            #     self.port = 8080
-                            # logger.info(f"XPlane API at {self.api_url}")
-                        else:
-                            logger.info("XPlane UDP beacon is not connected")
                     else:
                         logger.warning(f"web socket url is none {url}")
             except:
@@ -959,7 +995,7 @@ class XPlaneWebSocket(XPlaneREST):
                     if self.connected:
                         self._already_warned = 0
                         number_of_timeouts = 0
-                        logger.info(f"beacon: {self.capabilities()}")
+                        logger.info(f"capabilities: {self.capabilities()}")
                         if self.xp_version is not None:
                             curr = Version(self.xp_version)
                             xpmin = Version(XP_MIN_VERSION_STR)
@@ -1207,6 +1243,10 @@ class XPlaneWebSocket(XPlaneREST):
     def set_command_is_active_false_without_duration(self, path) -> int:
         return self.set_command_is_active_without_duration(path=path, active=False)
 
+    @abstractmethod
+    def start(self):
+        raise NotImplementedError
+
 
 # #############################################
 # SIMULATOR
@@ -1233,13 +1273,13 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         self.observables = []  # cannot create them here since XPlane does not exist yet...
 
         self.xp_home = environ.get(ENVIRON_KW.SIMULATOR_HOME.value)
-        self.api_host = environ.get(ENVIRON_KW.API_HOST.value)
-        self.api_port = environ.get(ENVIRON_KW.API_PORT.value)
-        self.api_path = environ.get(ENVIRON_KW.API_PATH.value)
-        self.api_version = environ.get(ENVIRON_KW.API_VERSION.value)
+        self.api_host = environ.get(ENVIRON_KW.API_HOST.value, "127.0.0.1")
+        self.api_port = environ.get(ENVIRON_KW.API_PORT.value, 8086)
+        self.api_path = environ.get(ENVIRON_KW.API_PATH.value, "/api")
+        self.api_version = environ.get(ENVIRON_KW.API_VERSION.value, "v1")
 
         Simulator.__init__(self, cockpit=cockpit, environ=environ)
-        XPlaneWebSocket.__init__(self, host=self.api_host[0], port=self.api_host[1])
+        XPlaneWebSocket.__init__(self, host=self.api_host[0], port=self.api_host[1], api=self.api_path, api_version=self.api_version)
         SimulatorVariableListener.__init__(self, name=self.name)
         self.cockpit.set_logging_level(__name__)
 
@@ -1623,7 +1663,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
             try:
                 message = self.ws.receive(timeout=RECEIVE_TIMEOUT)
                 if message is None:
-                    logger.log(SPAM_LEVEL, "waiting for data from simulator..") # at {datetime.now()}")
+                    logger.log(SPAM_LEVEL, "waiting for data from simulator..")  # at {datetime.now()}")
                     continue
 
                 now = datetime.now()

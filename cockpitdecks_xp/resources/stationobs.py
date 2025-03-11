@@ -26,6 +26,8 @@ class WeatherStationObservable(Observable):
     if necessary.
     """
 
+    OBSERVABLE_NAME = "weather-station"
+
     DEFAULT_STATION = "EBBR"
 
     def __init__(self, simulator: Simulator):
