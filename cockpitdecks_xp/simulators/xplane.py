@@ -37,12 +37,14 @@ logger.setLevel(SPAM_LEVEL)  # To see which dataref are requested
 
 WEBAPILOGFILE = "webapi.log"
 webapi_logger = logging.getLogger("webapi")
+# webapi_logger.setLevel(logging.DEBUG)
 if WEBAPILOGFILE is not None:
     formatter = logging.Formatter('"%(asctime)s" %(message)s')
     handler = logging.FileHandler(WEBAPILOGFILE, mode="w")
     handler.setFormatter(formatter)
     webapi_logger.addHandler(handler)
     webapi_logger.propagate = False
+
 
 # #############################################
 # CONFIGURATION AND OPTIONS
@@ -60,8 +62,7 @@ XP_MAX_VERSION_STR = "12.1.4"
 
 # /api/capabiltiies introduced in /api/v2. Here is a default one for v1.
 DEFAULT_CAPABILITIES = {"api": {"versions": ["v1"]}, "x-plane": {"version": "12.1.1"}}
-
-USE_REST = True
+USE_REST = True  # force REST usage for remote access, otherwise websockets is privileged
 
 # #############################################
 # PERMANENT DATAREFS
@@ -89,6 +90,7 @@ PERMANENT_SIMULATOR_EVENTS = {}  #
 # REST OBJECTS
 #
 INDICES = "indices"
+UPDATES = "updates"
 
 
 # REST API model keywords
@@ -96,10 +98,12 @@ class REST_KW(Enum):
     COMMANDS = "commands"
     DATA = "data"
     DATAREFS = "datarefs"
+    DESCRIPTION = "description"
     DURATION = "duration"
     IDENT = "id"
     INDEX = "index"
     ISACTIVE = "is_active"
+    ISWRITABLE = "is_writable"
     NAME = "name"
     PARAMS = "params"
     REQID = "req_id"
@@ -117,13 +121,22 @@ class REST_RESPONSE(Enum):
     DATAREF_UPDATE = "dataref_update_values"
 
 
+# class obj(object):
+#     def __init__(self, d):
+#         for k, v in d.items():
+#             if isinstance(k, (list, tuple)):
+#                 setattr(self, k, [obj(x) if isinstance(x, dict) else x for x in v])
+#             else:
+#                 setattr(self, k, obj(v) if isinstance(v, dict) else v)
+
+
 # Dataref object
 class XPRESTObject:
     """Small structure to host a dataref or a command meta data: Id, value_type, etc."""
 
     def __init__(self, path: str) -> None:
         self.path = path
-        self.config = None
+        self.config = {}
         self.api = None
         self.valid = False
 
@@ -131,13 +144,13 @@ class XPRESTObject:
     def ident(self) -> int | None:
         if not self.valid:
             return None
-        return self.config[REST_KW.IDENT.value]
+        return self.config.get(REST_KW.IDENT.value)
 
     @property
     def value_type(self) -> int | None:
         if not self.valid:
             return None
-        return self.config[REST_KW.VALUE_TYPE.value]
+        return self.config.get(REST_KW.VALUE_TYPE.value)
 
     def init(self, cache):
         if cache is None:
@@ -173,6 +186,12 @@ class Dataref(SimulatorVariable, XPRESTObject):
 
     def __str__(self) -> str:
         return f"{self.path}={self.value}"
+
+    @property
+    def is_writable(self) -> bool | None:
+        if not self.valid:
+            return None
+        return self.config.get(REST_KW.ISWRITABLE.value)
 
     @property
     def use_rest(self):
@@ -307,6 +326,12 @@ class XPlaneInstruction(SimulatorInstruction, XPRESTObject):
     def __init__(self, name: str, simulator: XPlane, delay: float = 0.0, condition: str | None = None, button: "Button" = None) -> None:
         SimulatorInstruction.__init__(self, name=name, simulator=simulator, delay=delay, condition=condition)
         XPRESTObject.__init__(self, path=name)
+
+    @property
+    def description(self) -> bool | None:
+        if not self.valid:
+            return None
+        return self.config.get(REST_KW.DESCRIPTION.value)
 
     @property
     def use_rest(self):
@@ -552,8 +577,10 @@ class BeginEndCommand(Command):
 
     def rest_execute(self) -> bool:
         if not self.valid:
-            logger.error(f"command {self.path} not found")
-            return False
+            self.init(cache=self.simulator.all_commands)
+            if not self.valid:
+                logger.error(f"command {self.path} is not valid")
+                return False
         payload = {REST_KW.IDENT.value: self.ident, REST_KW.DURATION.value: self.DURATION}
         url = f"{self.simulator.api_url}/command/{self.ident}/activate"
         response = requests.post(url, json=payload)
@@ -932,12 +959,24 @@ class XPlaneWebSocket(XPlaneREST, ABC):
         self.should_not_connect = None  # threading.Event()
         self.connect_thread = None  # threading.Thread()
         self._already_warned = 0
+        self._stats = {}
 
     @property
     def next_req(self) -> int:
         """Provides request number for WebSocket requests"""
         self.req_number = self.req_number + 1
         return self.req_number
+
+    def req_stats(self):
+        stats = {}
+        for r, v in self._requests.items():
+            if v not in stats:
+                stats[v] = 1
+            else:
+                stats[v] = stats[v] + 1
+        if self._stats != stats:
+            self._stats = stats
+            logger.log(SPAM_LEVEL, f"requests statistics: {stats}")
 
     # ################################
     # Connection to web socket
@@ -1115,10 +1154,17 @@ class XPlaneWebSocket(XPlaneREST, ABC):
         dref = self.get_dataref_info_by_name(name)
         return split, dref, name, index
 
+    def inc_dref(self, dref):
+        if UPDATES not in dref:
+            dref[UPDATES] = 0
+        dref[UPDATES] = dref[UPDATES] + 1
+
     def append_index(self, dref, i):
+        # see https://stackoverflow.com/questions/13694034/is-a-python-list-guaranteed-to-have-its-elements-stay-in-the-order-they-are-inse
         if INDICES not in dref:
-            dref[INDICES] = set()
-        dref[INDICES].add(i)
+            dref[INDICES] = list()  # set() do not preserve order of insertion
+        if i not in dref[INDICES]:
+            dref[INDICES].append(i)
         webapi_logger.info(f"REG {dref[REST_KW.NAME.value]}: {i} ({dref[INDICES]})")
 
     def remove_index(self, dref, i):
@@ -1349,9 +1395,9 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         return now
 
     def create_local_observables(self):
-        if len(self.observables) > 0:
+        if len(self.observables) > 0 or len(self.cockpit._permanent_observables) == 0:
             return
-        self.observables = [WeatherStationObservable(simulator=self), DaytimeObservable(simulator=self), MapCommandObservable(simulator=self)]
+        self.observables = [obs(simulator=self) for obs in self.cockpit._permanent_observables.values()]
 
     #
     # Datarefs
@@ -1648,14 +1694,26 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
     def ws_receiver(self):
         """Read and decode websocket messages and enqueue events"""
 
+        # WS_PCKT_RECV = "websockets_packets_received"
+        # WS_RSLT_RECV = "websockets_result_received"
+        # WS_VUPD_RECV = "websockets_value_update_received"
+        # WS_DREF_RECV = "websockets_dataref_value_received"
+        # WS_CMDS_RECV = "websockets_command_active_received"
+        # COMMAND_ACTIVE_ENQUEUED: Command active enqueued
+        # UPDATE_ENQUEUED = Value change enqueued
+        # UPDATE_ENQUEUED = Value change enqueued
+
         def dref_round(local_path: str, local_value):
             local_r = self.get_rounding(simulator_variable_name=local_path)
             local_v = round(local_value, local_r) if local_r is not None and local_value is not None else local_value
             return 0.0 if local_v < 0.0 and local_v > -0.001 else local_v
 
-        logger.debug("starting websocket listener..")
+        logger.log(SPAM_LEVEL, "starting websocket listener..")
+        RECEIVE_TIMEOUT = 1  # when not connected, checks often
         total_reads = 0
         print_zulu = 0
+        cnt = 0
+        cnt_mod = 10
         start_time = datetime.now()
         last_read_ts = start_time
         total_read_time = 0.0
@@ -1664,16 +1722,19 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
             try:
                 message = self.ws.receive(timeout=RECEIVE_TIMEOUT)
                 if message is None:
-                    logger.log(SPAM_LEVEL, "waiting for data from simulator..")  # at {datetime.now()}")
+                    cnt = cnt + 1
+                    if cnt % cnt_mod == 0:
+                        logger.log(SPAM_LEVEL, "waiting for data from simulator..")  # at {datetime.now()}")
                     continue
 
                 now = datetime.now()
                 if total_reads == 0:
                     logger.log(SPAM_LEVEL, f"..first message at {now} ({round((now - start_time).seconds, 2)} secs.)")
+                    RECEIVE_TIMEOUT = 5  # when connected, check less often, message will arrive
                 # Estimate response time
                 self.set_internal_variable(name=COCKPITDECKS_INTVAR.INTDREF_CONNECTION_STATUS.value, value=4, cascade=True)
 
-                self.inc(COCKPITDECKS_INTVAR.UDP_READS.value)
+                self.inc(COCKPITDECKS_INTVAR.WS_PCKT_RECV.value)
                 total_reads = total_reads + 1
                 delta = now - last_read_ts
                 self.set_internal_variable(
@@ -1690,9 +1751,11 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
                 try:
                     data = json.loads(message)
                     resp_type = data[REST_KW.TYPE.value]
-
+                    #
+                    #
                     if resp_type == REST_RESPONSE.RESULT.value:
 
+                        self.inc(COCKPITDECKS_INTVAR.WS_RSLT_RECV.value)
                         webapi_logger.info(f"<<RCV  {data}")
                         req_id = data.get(REST_KW.REQID.value)
                         if req_id is not None:
@@ -1704,75 +1767,11 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
                             logger.warning(f"req. {req_id}: {errmsg}")
                         else:
                             logger.debug(f"req. {req_id}: {REST_KW.SUCCESS.value if data[REST_KW.SUCCESS.value] else 'failed'}")
-
-                    elif resp_type == REST_RESPONSE.DATAREF_UPDATE.value:
-
-                        if REST_KW.DATA.value in data:
-                            for didx, value in data[REST_KW.DATA.value].items():
-                                if didx in self._dref_cache and self._dref_cache[didx] == value:  # cached RAW value
-                                    continue
-                                self._dref_cache[didx] = value
-                                dref = self.get_dataref_info_by_id(int(didx))
-                                if dref is not None:
-                                    d = dref[REST_KW.NAME.value]
-                                    if d == ZULU_TIME_SEC:
-                                        now = datetime.now().astimezone(tz=timezone.utc)
-                                        seconds_since_midnight = (now - now.replace(hour=0, minute=0, second=0, microsecond=0)).total_seconds()
-                                        diff = value - seconds_since_midnight
-                                        self.set_internal_variable(
-                                            name=COCKPITDECKS_INTVAR.ZULU_DIFFERENCE.value,
-                                            value=diff,
-                                            cascade=(total_reads % 2 == 0),
-                                        )
-                                        print_zulu = print_zulu + 1
-                                    if dref.get(REST_KW.VALUE_TYPE.value) is not None and dref[REST_KW.VALUE_TYPE.value] in ["int_array", "float_array"]:
-                                        # we must check each individual value...
-                                        if INDICES not in dref or len(value) != len(dref[INDICES]):
-                                            logger.warning(f"dataref array {d} size mismatch ({len(value)}/{len(dref[INDICES])})")
-                                            logger.warning(f"dataref array {d}: value: {value}, indices: {dref[INDICES]})")
-                                        for v1, idx, cnt in zip(value, dref[INDICES], range(len(value))):
-                                            d1 = f"{d}[{idx}]"
-                                            v = dref_round(local_path=d1, local_value=v1)
-                                            if d1 not in self._dref_cache or self._dref_cache[d1] != v:  # cached rounded value
-                                                webapi_logger.info(f"DREF ARRAY: {d} {idx} {self._dref_cache.get(d1)} -> {v}")
-                                                e = DatarefEvent(
-                                                    sim=self,
-                                                    dataref=d1,
-                                                    value=v1,
-                                                    cascade=d in self.simulator_variable_to_monitor.keys(),
-                                                )
-                                                self.inc(COCKPITDECKS_INTVAR.UPDATE_ENQUEUED.value)
-                                                self._dref_cache[d1] = v
-                                    else:
-                                        v = value
-                                        send_raw = True
-                                        if (
-                                            dref.get(REST_KW.VALUE_TYPE.value) is not None
-                                            and dref[REST_KW.VALUE_TYPE.value] == "data"
-                                            and type(value) in [bytes, str]
-                                        ):  # float, double, int, int_array, float_array, data
-                                            v = base64.b64decode(value).decode("ascii").replace("\u0000", "")
-                                            send_raw = False
-                                        elif type(v) in [int, float]:
-                                            v = dref_round(local_path=d, local_value=value)
-                                        if d not in self._dref_cache or self._dref_cache[d] != v:  # cached rounded value
-                                            if d != ZULU_TIME_SEC or print_zulu % 120 == 0:
-                                                webapi_logger.info(f"DREF: {d} {self._dref_cache.get(d)} -> {v}")
-                                            e = DatarefEvent(
-                                                sim=self,
-                                                dataref=d,
-                                                value=value if send_raw else v,  # send raw value if possible
-                                                cascade=d in self.simulator_variable_to_monitor.keys(),
-                                            )
-                                            self.inc(COCKPITDECKS_INTVAR.UPDATE_ENQUEUED.value)
-                                            self._dref_cache[d] = v
-                                else:
-                                    logger.warning(f"dataref {didx} not found")
-                        else:
-                            logger.warning(f"no data: {data}")
-
+                    #
+                    #
                     elif resp_type == REST_RESPONSE.COMMAND_ACTIVE.value:
 
+                        self.inc(COCKPITDECKS_INTVAR.WS_CMDS_RECV.value)
                         if REST_KW.DATA.value in data:
                             for cidx, value in data[REST_KW.DATA.value].items():
                                 cref = self.get_command_info_by_id(int(cidx))
@@ -1784,7 +1783,82 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
                                     self.inc(COCKPITDECKS_INTVAR.COMMAND_ACTIVE_ENQUEUED.value)
                         else:
                             logger.warning(f"no data: {data}")
+                    #
+                    #
+                    elif resp_type == REST_RESPONSE.DATAREF_UPDATE.value:
 
+                        self.inc(COCKPITDECKS_INTVAR.WS_VUPD_RECV.value)
+                        if REST_KW.DATA.value in data:
+                            for didx, value in data[REST_KW.DATA.value].items():
+                                if didx in self._dref_cache and self._dref_cache[didx] == value:  # cached RAW value
+                                    continue
+                                self._dref_cache[didx] = value
+                                dref = self.get_dataref_info_by_id(int(didx))
+                                if dref is not None:
+                                    self.inc_dref(dref)
+                                    d = dref[REST_KW.NAME.value]
+
+                                    # Special treatment of ZULU time
+                                    if d == ZULU_TIME_SEC:
+                                        now = datetime.now().astimezone(tz=timezone.utc)
+                                        seconds_since_midnight = (now - now.replace(hour=0, minute=0, second=0, microsecond=0)).total_seconds()
+                                        diff = value - seconds_since_midnight
+                                        self.set_internal_variable(
+                                            name=COCKPITDECKS_INTVAR.ZULU_DIFFERENCE.value,
+                                            value=diff,
+                                            cascade=(total_reads % 2 == 0),
+                                        )
+                                        print_zulu = print_zulu + 1
+                                        if print_zulu % 120 == 0:
+                                            webapi_logger.info(f"DREF: {d} {self._dref_cache.get(d)} -> {v}")
+                                            self.req_stats()
+                                        e = DatarefEvent(sim=self, dataref=d, value=value, cascade=True)
+                                        self.inc(COCKPITDECKS_INTVAR.UPDATE_ENQUEUED.value)
+                                        continue
+
+                                    if dref.get(REST_KW.VALUE_TYPE.value) is not None and dref[REST_KW.VALUE_TYPE.value] in ["int_array", "float_array"]:
+
+                                        # Arrays
+                                        if INDICES not in dref or len(value) != len(dref[INDICES]):
+                                            logger.warning(f"dataref array {d} size mismatch ({len(value)}/{len(dref[INDICES])})")
+                                            logger.warning(f"dataref array {d}: value: {value}, indices: {dref[INDICES]})")
+                                        for v1, idx in zip(value, dref[INDICES]):
+                                            d1 = f"{d}[{idx}]"
+                                            v = dref_round(local_path=d1, local_value=v1)
+                                            if d1 not in self._dref_cache or self._dref_cache[d1] != v:  # cached rounded value
+                                                cascade = d1 in self.simulator_variable_to_monitor.keys()
+                                                webapi_logger.info(f"DREF ARRAY: {d}[{idx}] {self._dref_cache.get(d1)} -> {v} (cascade={cascade})")
+                                                e = DatarefEvent(sim=self, dataref=d1, value=v1, cascade=cascade)
+                                                self.inc(COCKPITDECKS_INTVAR.UPDATE_ENQUEUED.value)
+                                                self._dref_cache[d1] = v
+
+                                    else:
+                                        # Scalar values
+                                        v = value
+                                        send_raw = True
+                                        if (
+                                            dref.get(REST_KW.VALUE_TYPE.value) is not None
+                                            and dref[REST_KW.VALUE_TYPE.value] == "data"
+                                            and type(value) in [bytes, str]
+                                        ):  # data = strings
+                                            v = base64.b64decode(value).decode("ascii").replace("\u0000", "")
+                                            send_raw = False
+                                        elif type(v) in [int, float]:
+                                            v = dref_round(local_path=d, local_value=value)
+
+                                        if d not in self._dref_cache or self._dref_cache[d] != v:  # cached rounded value
+                                            cascade = d in self.simulator_variable_to_monitor.keys()
+                                            webapi_logger.info(f"DREF: {d} {self._dref_cache.get(d)} -> {v} (cascade={cascade})")
+                                            e = DatarefEvent(sim=self, dataref=d, value=value if send_raw else v, cascade=cascade)  # send raw value if possible
+                                            self._dref_cache[d] = v
+                                            self.inc(COCKPITDECKS_INTVAR.UPDATE_ENQUEUED.value)
+
+                                else:
+                                    logger.warning(f"dataref {didx} not found")
+                        else:
+                            logger.warning(f"no data: {data}")
+                    #
+                    #
                     else:
                         logger.warning(f"invalid response type {resp_type}: {data}")
 
@@ -1830,6 +1904,8 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
 
     def stop(self):
         if not self.ws_event.is_set():
+            self.all_datarefs.save("datarefs.json")
+            self.all_commands.save("commands.json")
             self.cleanup()
             self.ws_event.set()
             if self.ws_thread is not None and self.ws_thread.is_alive():
