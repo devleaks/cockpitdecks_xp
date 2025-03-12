@@ -846,14 +846,15 @@ class XPlaneREST:
                     self.port = 8080
                 xp_version = self._beacon.beacon_data.get(BEACON_DATA_KW.XPVERSION.value)
                 if xp_version is not None:
+                    use_rest = ", use REST" if USE_REST and not self._beacon.runs_locally() else ""
                     if self._beacon.beacon_data[BEACON_DATA_KW.XPVERSION.value] >= 121400:
                         self._api_version = "/v2"
                         self._first_try = True
-                        logger.info(f"XPlane API at {self.api_url} from UDP beacon data")
+                        logger.info(f"XPlane API at {self.api_url} from UDP beacon data{use_rest}")
                     elif self._beacon.beacon_data[BEACON_DATA_KW.XPVERSION.value] >= 121100:
                         self._api_version = "/v1"
                         self._first_try = True
-                        logger.info(f"XPlane API at {self.api_url} from UDP beacon data")
+                        logger.info(f"XPlane API at {self.api_url} from UDP beacon data{use_rest}")
                     else:
                         logger.warning(f"could not set API version from {xp_version} ({self._beacon.beacon_data})")
                 else:
@@ -1165,14 +1166,14 @@ class XPlaneWebSocket(XPlaneREST, ABC):
             dref[INDICES] = list()  # set() do not preserve order of insertion
         if i not in dref[INDICES]:
             dref[INDICES].append(i)
-        webapi_logger.info(f"REG {dref[REST_KW.NAME.value]}: {i} ({dref[INDICES]})")
+        # webapi_logger.info(f"REG {dref[REST_KW.NAME.value]}: {i} ({dref[INDICES]})")
 
     def remove_index(self, dref, i):
         if INDICES not in dref:
             logger.warning(f"{dref} has no index list")
             return
         dref[INDICES].remove(i)
-        webapi_logger.info(f"DEREG {dref[REST_KW.NAME.value]}: {i} ({dref[INDICES]})")
+        # webapi_logger.info(f"DEREG {dref[REST_KW.NAME.value]}: {i} ({dref[INDICES]})")
 
     def set_dataref_value(self, path, value) -> int:
         if value is None:
@@ -1708,6 +1709,12 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
             local_v = round(local_value, local_r) if local_r is not None and local_value is not None else local_value
             return 0.0 if local_v < 0.0 and local_v > -0.001 else local_v
 
+        def dref_round_arr(local_path: str, local_value):
+            local_r = self.get_rounding(simulator_variable_name=local_path)
+            if local_r is not None:
+                return [round(l, local_r) for l in local_value]
+            return local_value
+
         logger.log(SPAM_LEVEL, "starting websocket listener..")
         RECEIVE_TIMEOUT = 1  # when not connected, checks often
         total_reads = 0
@@ -1819,6 +1826,18 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
                                     if dref.get(REST_KW.VALUE_TYPE.value) is not None and dref[REST_KW.VALUE_TYPE.value] in ["int_array", "float_array"]:
 
                                         # Arrays
+                                        # Whole array
+                                        if len(dref[INDICES]) == 0:
+                                            v = dref_round_arr(value)
+                                            if d not in self._dref_cache or self._dref_cache[d] != v:  # cached rounded value
+                                                cascade = d in self.simulator_variable_to_monitor.keys()
+                                                webapi_logger.info(f"DREF WHOLE ARRAY: {d} {self._dref_cache.get(d)} -> {v} (cascade={cascade})")
+                                                e = DatarefEvent(sim=self, dataref=d, value=v, cascade=cascade)  # send raw value if possible
+                                                self._dref_cache[d] = value
+                                                self.inc(COCKPITDECKS_INTVAR.UPDATE_ENQUEUED.value)
+                                            continue
+
+                                        # Single array element
                                         if INDICES not in dref or len(value) != len(dref[INDICES]):
                                             logger.warning(f"dataref array {d} size mismatch ({len(value)}/{len(dref[INDICES])})")
                                             logger.warning(f"dataref array {d}: value: {value}, indices: {dref[INDICES]})")
@@ -1840,7 +1859,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
                                             dref.get(REST_KW.VALUE_TYPE.value) is not None
                                             and dref[REST_KW.VALUE_TYPE.value] == "data"
                                             and type(value) in [bytes, str]
-                                        ):  # data = strings
+                                        ):  # data = string
                                             v = base64.b64decode(value).decode("ascii").replace("\u0000", "")
                                             send_raw = False
                                         elif type(v) in [int, float]:
