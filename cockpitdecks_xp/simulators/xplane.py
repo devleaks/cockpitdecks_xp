@@ -243,11 +243,13 @@ class Dataref(SimulatorVariable, XPRESTObject):
             return False
         value = self.value
         if self.value_type == DATAREF_DATATYPE.DATA.value:
+            # Encode string
             value = str(value).encode("ascii")
             value = base64.b64encode(value).decode("ascii")
-        payload = {REST_KW.IDENT.value: self.ident, REST_KW.DATA.value: value}
+        payload = {REST_KW.DATA.value: value}
         url = f"{self.simulator.api_url}/datarefs/{self.ident}/value"
         if self.index is not None and self.value_type in [DATAREF_DATATYPE.INTARRAY.value, DATAREF_DATATYPE.FLOATARRAY.value]:
+            # Update just one element of the array
             url = url + f"?index={self.index}"
         webapi_logger.info(f"PATCH {self.path}: {url}, {payload}")
         response = requests.patch(url, json=payload)
