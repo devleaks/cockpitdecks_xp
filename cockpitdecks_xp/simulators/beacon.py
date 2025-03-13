@@ -198,7 +198,7 @@ class XPlaneBeacon:
                             else:
                                 logger.debug(f"X-Plane version ok ({self.min_version}<= {curr} <={self.max_version})")
                                 logger.info("connected")
-                                logger.info(f"XPlane beacon {'runs locally' if self.runs_locally() else 'is remote'}")
+                                logger.info(f"XPlane beacon {'runs locally' if self.same_host() else 'is remote'}")
                         self.callback(True)  # connected
                 except XPlaneVersionNotSupported:
                     self.beacon_data = {}
@@ -260,7 +260,7 @@ class XPlaneBeacon:
         self.min_version = minversion
         self.max_version = maxversion
 
-    def runs_locally(self) -> bool:
+    def same_host(self) -> bool:
         if self.connected:
             return ipaddress.ip_address(self.local_ip) == ipaddress.ip_address(self.beacon_data[BEACON_DATA_KW.IP.value])
         return False
@@ -269,4 +269,4 @@ class XPlaneBeacon:
 if __name__ == "__main__":
     xp = XPlaneBeacon()
     xp.connect()
-    print(xp.runs_locally())
+    print(xp.same_host())

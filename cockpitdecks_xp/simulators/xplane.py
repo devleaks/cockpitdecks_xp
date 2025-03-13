@@ -114,6 +114,16 @@ class REST_KW(Enum):
     VALUE_TYPE = "value_type"
 
 
+# value_type: float, double, int, int_array, float_array, data
+class DATAREF_DATATYPE(Enum):
+    INTEGER = "int"
+    FLOAT = "float"
+    DOUBLE = "double"
+    INTARRAY = "int_array"
+    FLOATARRAY = "float_array"
+    DATA = "data"
+
+
 # WEB API RETURN CODES
 class REST_RESPONSE(Enum):
     RESULT = "result"
@@ -179,23 +189,29 @@ class Dataref(SimulatorVariable, XPRESTObject):
         SimulatorVariable.__init__(self, name=path, simulator=simulator, data_type="string" if is_string else "float")
         XPRESTObject.__init__(self, path=path)
 
-        self.index = 0  # 4
-        if "[" in path:  # sim/some/values[4]
-            self.root_name = self.name[: self.name.find("[")]
-            self.index = int(self.name[self.name.find("[") + 1 : self.name.find("]")])
+        self.index = None  # sign is it not an array
+        if "[" in path:
+            self.path = self.name[: self.name.find("[")]  # sim/some/values
+            self.index = int(self.name[self.name.find("[") + 1 : self.name.find("]")])  # 4
 
     def __str__(self) -> str:
-        return f"{self.path}={self.value}"
+        if self.index is not None:
+            return f"{self.path}[{self.index}]={self.value}"
+        else:
+            return f"{self.path}={self.value}"
 
     @property
     def is_writable(self) -> bool | None:
         if not self.valid:
-            return None
+            self.init(cache=self.simulator.all_datarefs)
+            if not self.valid:
+                logger.error(f"dataref {self.path} not valid")
+                return False
         return self.config.get(REST_KW.ISWRITABLE.value)
 
     @property
     def use_rest(self):
-        return USE_REST and (hasattr(self.simulator, "runs_locally") and not self.simulator.runs_locally())
+        return USE_REST and (hasattr(self.simulator, "same_host") and not self.simulator.same_host())
 
     @property
     def rest_value(self):
@@ -204,13 +220,17 @@ class Dataref(SimulatorVariable, XPRESTObject):
             if not self.valid:
                 logger.error(f"dataref {self.path} not valid")
                 return False
-        url = f"{self.api_url}/datarefs/{self.ident}/value"
+        url = f"{self.simulator.api_url}/datarefs/{self.ident}/value"
         response = requests.get(url)
-        data = response.json()
-        webapi_logger.info(f"GET {self.path}: {url} = {data}")
-        if REST_KW.DATA.value in data and type(data[REST_KW.DATA.value]) in [bytes, str]:
-            return base64.b64decode(data[REST_KW.DATA.value]).decode("ascii").replace("\u0000", "")
-        return data[REST_KW.DATA.value]
+        if response.status_code == 200:
+            respjson = response.json()
+            webapi_logger.info(f"GET {self.path}: {url} = {respjson}")
+            if REST_KW.DATA.value in respjson and type(respjson[REST_KW.DATA.value]) in [bytes, str]:
+                return base64.b64decode(respjson[REST_KW.DATA.value]).decode("ascii").replace("\u0000", "")
+            return respjson[REST_KW.DATA.value]
+        webapi_logger.info(f"ERROR {self.path}: {response} {response.reason} {response.text}")
+        logger.error(f"rest_value: {response} {response.reason} {response.text}")
+        return None
 
     def rest_write(self) -> bool:
         if not self.valid:
@@ -218,19 +238,25 @@ class Dataref(SimulatorVariable, XPRESTObject):
             if not self.valid:
                 logger.error(f"dataref {self.path} not valid")
                 return False
+        if not self.is_writable:
+            logger.warning(f"dataref {self.path} is not writable")
+            return False
         value = self.value
-        if self.value_type == "data":
+        if self.value_type == DATAREF_DATATYPE.DATA.value:
             value = str(value).encode("ascii")
             value = base64.b64encode(value).decode("ascii")
         payload = {REST_KW.IDENT.value: self.ident, REST_KW.DATA.value: value}
         url = f"{self.simulator.api_url}/datarefs/{self.ident}/value"
-        webapi_logger.info(f"PATCH {self.path}: {url}, {payload}")  # logger.debug
+        if self.index is not None and self.value_type in [DATAREF_DATATYPE.INTARRAY.value, DATAREF_DATATYPE.FLOATARRAY.value]:
+            url = url + f"?index={self.index}"
+        webapi_logger.info(f"PATCH {self.path}: {url}, {payload}")
         response = requests.patch(url, json=payload)
         if response.status_code == 200:
             data = response.json()
             logger.debug(f"result: {data}")
             return True
-        logger.error(f"write: {response.reason}")
+        webapi_logger.info(f"ERROR {self.path}: {response} {response.reason} {response.text}")
+        logger.error(f"write: {response} {response.reason} {response.text}")
         return False
 
     def ws_write(self) -> int:
@@ -245,14 +271,7 @@ class Dataref(SimulatorVariable, XPRESTObject):
             if not self.valid:
                 logger.error(f"dataref {self.path} not valid")
                 return False
-        if self._writable:
-            if not self.is_internal:
-                return self._write()
-            else:
-                logger.warning(f"{self.name} is internal variable, not saved to simulator")
-        else:
-            logger.warning(f"{self.name} is not writable")
-        return False
+        return self._write()
 
 
 # Events from simulator
@@ -335,7 +354,7 @@ class XPlaneInstruction(SimulatorInstruction, XPRESTObject):
 
     @property
     def use_rest(self):
-        return USE_REST and (hasattr(self.simulator, "runs_locally") and not self.simulator.runs_locally())
+        return USE_REST and (hasattr(self.simulator, "same_host") and not self.simulator.same_host())
 
     @property
     def is_no_operation(self) -> bool:
@@ -838,7 +857,8 @@ class XPlaneREST:
         if connected:
             logger.info("X-Plane beacon connected")
             if self._beacon.connected:
-                if self._beacon.runs_locally():
+                same_host = self._beacon.same_host()
+                if same_host:
                     self.host = "127.0.0.1"
                     self.port = 8086
                 else:
@@ -846,7 +866,7 @@ class XPlaneREST:
                     self.port = 8080
                 xp_version = self._beacon.beacon_data.get(BEACON_DATA_KW.XPVERSION.value)
                 if xp_version is not None:
-                    use_rest = ", use REST" if USE_REST and not self._beacon.runs_locally() else ""
+                    use_rest = ", use REST" if USE_REST and not same_host else ""
                     if self._beacon.beacon_data[BEACON_DATA_KW.XPVERSION.value] >= 121400:
                         self._api_version = "/v2"
                         self._first_try = True
@@ -921,7 +941,7 @@ class XPlaneREST:
         if self.version == "v2":  # >
             self.all_commands.load("/commands")
             # self.all_commands.save("commands.json")
-        logger.info(f"dataref cache ({len(self.all_datarefs._data)}) and command cache ({len(self.all_commands._data)}) reloaded {'*-><-'*15}")
+        logger.info(f"dataref cache ({len(self.all_datarefs._data)}) and command cache ({len(self.all_commands._data)}) reloaded")
 
     def get_dataref_info_by_name(self, path: str):
         return self.all_datarefs.get_by_name(path) if self.all_datarefs is not None else None
@@ -1375,12 +1395,8 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
     # ################################
     # Others
     #
-    def runs_locally(self) -> bool:
-        if self.connected:
-            logger.debug(f"local ip {self.local_ip} vs beacon {self.host}")
-        else:
-            logger.debug(f"local ip {self.local_ip} but not connected to X-Plane")
-        return False if not self.connected else self.local_ip == self.host
+    def same_host(self) -> bool:
+        return self._beacon.same_host() if self.connected else False
 
     def datetime(self, zulu: bool = False, system: bool = False) -> datetime:
         """Returns the simulator date and time"""
@@ -1919,12 +1935,14 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         self.clean_simulator_events_to_monitor()
         self.add_all_simulator_events_to_monitor()
         logger.info("reloading pages")
-        self.cockpit.reload_pages()  # to take into account updated values
+        self.cockpit.reload_pages()  # to request page variables and take into account updated values
 
     def stop(self):
         if not self.ws_event.is_set():
-            self.all_datarefs.save("datarefs.json")
-            self.all_commands.save("commands.json")
+            if self.all_datarefs is not None:
+                self.all_datarefs.save("datarefs.json")
+            if self.all_commands is not None:
+                self.all_commands.save("commands.json")
             self.cleanup()
             self.ws_event.set()
             if self.ws_thread is not None and self.ws_thread.is_alive():
@@ -1947,7 +1965,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         self.clean_simulator_variables_to_monitor()
         self.clean_simulator_events_to_monitor()
 
-    def restart_reset(self):
+    def reset_connection(self):
         self.stop()
         self.disconnect()
         self.connect()
