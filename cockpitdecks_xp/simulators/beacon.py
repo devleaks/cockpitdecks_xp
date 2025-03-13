@@ -1,13 +1,14 @@
 import logging
 import threading
 import socket
-import ipaddress
 import struct
 import binascii
 import platform
-from typing import Callable
+from typing import Callable, List
 from enum import Enum
 from datetime import datetime
+
+import ifaddr
 
 logger = logging.getLogger(__name__)
 # logger.setLevel(logging.DEBUG)
@@ -22,17 +23,15 @@ class XPlaneVersionNotSupported(Exception):
     args = "XPlane version not supported"
 
 
-def my_ip() -> str | set:
-    x = set([address[4][0] for address in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)])
-    return list(x)[0] if len(x) == 1 else x
-
-
-def get_ip(s) -> str:
-    c = s[0]
-    if c in "0123456789":
-        return ipaddress.ip_address(s)
-    else:
-        return ipaddress.ip_address(socket.gethostbyname(s))
+def list_my_ips() -> List[str]:
+    # import ifaddr
+    r = list()
+    adapters = ifaddr.get_adapters()
+    for adapter in adapters:
+        for ip in adapter.ips:
+            if type(ip.ip) is str:
+                r.append(ip.ip)
+    return r
 
 
 class BEACON_DATA_KW(Enum):
@@ -262,7 +261,8 @@ class XPlaneBeacon:
 
     def same_host(self) -> bool:
         if self.connected:
-            return ipaddress.ip_address(self.local_ip) == ipaddress.ip_address(self.beacon_data[BEACON_DATA_KW.IP.value])
+            logger.debug(f"{self.beacon_data[BEACON_DATA_KW.IP.value]} vs. {list_my_ips()}")
+            return self.beacon_data[BEACON_DATA_KW.IP.value] in list_my_ips()
         return False
 
 
