@@ -3,6 +3,7 @@
 #
 from __future__ import annotations
 
+import os
 import socket
 import threading
 import logging
@@ -18,17 +19,19 @@ from simple_websocket import Client, ConnectionClosed
 from packaging.version import Version
 
 from cockpitdecks_xp import __version__
-from cockpitdecks import CONFIG_KW, ENVIRON_KW, SPAM_LEVEL, DEPRECATION_LEVEL, MONITOR_RESOURCE_USAGE
+from cockpitdecks import CONFIG_KW, ENVIRON_KW, SPAM_LEVEL, DEPRECATION_LEVEL, MONITOR_RESOURCE_USAGE, RESOURCES_FOLDER, OBSERVABLES_FILE, yaml
 from cockpitdecks.strvar import Formula
 from cockpitdecks.instruction import MacroInstruction
 
 from cockpitdecks.simulator import Simulator, SimulatorEvent, SimulatorInstruction
 from cockpitdecks.simulator import SimulatorVariable, SimulatorVariableListener
 from cockpitdecks.resources.intvariables import COCKPITDECKS_INTVAR
+from cockpitdecks.observable import Observables
 
 from ..resources.stationobs import WeatherStationObservable
 from ..resources.daytimeobs import DaytimeObservable
 from ..resources.cmdlsnr import MapCommandObservable
+
 from .beacon import XPlaneBeacon, BEACON_DATA_KW
 
 logger = logging.getLogger(__name__)
@@ -85,7 +88,8 @@ REPLAY_DATAREFS = [
 RUNNING_TIME = "sim/time/total_flight_time_sec"  # Total time since the flight got reset by something
 # (let's say time since plane was loaded, reloaded, or changed)
 USEFUL_DATAREFS = [RUNNING_TIME, "sim/time/total_running_time_sec"]  # monitored to determine of cached data is valid  # Total time the sim has been up
-PERMANENT_SIMULATOR_DATA = set(USEFUL_DATAREFS)  # set(DATETIME_DATAREFS + REPLAY_DATAREFS + USEFUL_DATAREFS)
+
+PERMANENT_SIMULATOR_VARIABLES = set(USEFUL_DATAREFS)  # set(DATETIME_DATAREFS + REPLAY_DATAREFS + USEFUL_DATAREFS)
 PERMANENT_SIMULATOR_EVENTS = {}  #
 
 
@@ -943,11 +947,13 @@ class XPlaneREST:
                     logger.error("cannot determine api, api not set")
                     return
                 api = sorted(api_versions)[-1]  # takes the latest one, hoping it is the latest in time...
+                latest = ""
                 try:
                     api = f"v{max([int(v.replace('v', '')) for v in api_versions])}"
+                    latest = " latest"
                 except:
                     pass
-                logger.info(f"selected latest api {api} ({sorted(api_versions)})")
+                logger.info(f"selected{latest} api {api} ({sorted(api_versions)})")
             if api in api_versions:
                 self.version = api
                 self._api_version = f"/{api}"
@@ -1382,7 +1388,8 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         self.ws_event = threading.Event()
         self.ws_thread = None
         self._dref_cache = {}
-        self.observables = []  # cannot create them here since XPlane does not exist yet...
+        self._permanent_observables = []  # cannot create them now since XPlane does not exist yet
+        self._observables = None  # local config observables for this simulator
 
         self.xp_home = environ.get(ENVIRON_KW.SIMULATOR_HOME.value)
         self.api_host = environ.get(ENVIRON_KW.API_HOST.value, "127.0.0.1")
@@ -1455,18 +1462,55 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
             return simnow
         return now
 
-    def create_local_observables(self):
-        if len(self.observables) > 0 or len(self.cockpit._permanent_observables) == 0:
+    # ################################
+    # Observables
+    #
+    @property
+    def observables(self) -> list:
+        ret = self._permanent_observables
+        if self._observables is not None:
+            if hasattr(self._observables, "observables"):
+                ret = ret + self._observables.observables
+            elif type(self._observables) is list:
+                ret = ret + self._observables
+            else:
+                logger.warning(f"observables: {type(self._observables)} unknown")
+        return ret
+
+    def load_observables(self):
+        if self._observables is not None:
             return
-        self.observables = [obs(simulator=self) for obs in self.cockpit._permanent_observables.values()]
+        fn = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", RESOURCES_FOLDER, OBSERVABLES_FILE))
+        if os.path.exists(fn):
+            config = {}
+            with open(fn, "r") as fp:
+                config = yaml.load(fp)
+            self._observables = Observables(config=config, simulator=self)
+            logger.info(f"loaded {len(self._observables.observables)} simulator observables")
+        else:
+            logger.info("no simulator observables")
+
+    def create_permanent_observables(self):
+        # Permanent observables are "coded" observables
+        # They are created the first time add_permanently_monitored_simulator_variables() or add_permanently_monitored_simulator_events() is called
+        cd_obs = self.cockpit.get_permanent_observables()
+        if len(self._permanent_observables) > 0 or len(cd_obs) == 0:
+            return
+        self._permanent_observables = [obs(simulator=self) for obs in cd_obs]
+        logger.info(f"loaded {len(self._permanent_observables)} permanent simulator observables")
+        self.load_observables()
 
     #
     # Datarefs
     def get_variables(self) -> set:
         """Returns the list of datarefs for which the xplane simulator wants to be notified."""
-        ret = set(PERMANENT_SIMULATOR_DATA)
+        ret = set(PERMANENT_SIMULATOR_VARIABLES)
         for obs in self.observables:
             ret = ret | obs.get_variables()
+        more = self.cockpit.aircraft.get_variables()
+        if len(more) > 0:
+            ret = ret | more
+        # The Cockpit is not aware of any simulator variable it could ask for
         return ret
 
     def simulator_variable_changed(self, data: SimulatorVariable):
@@ -1479,6 +1523,10 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         ret = set(PERMANENT_SIMULATOR_EVENTS)
         for obs in self.observables:
             ret = ret | obs.get_events()
+        more = self.cockpit.aircraft.get_events()
+        if len(more) > 0:
+            ret = ret | more
+        # The Cockpit is not aware of any simulator event it could ask for
         return ret
 
     # ################################
@@ -1534,11 +1582,16 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         """Add simulator variables coming from different sources (cockpit, simulator itself, etc.)
         that are always monitored (for all aircrafts)
         """
-        self.create_local_observables()
-        dtdrefs = self.get_permanently_monitored_simulator_variables()
-        logger.info(f"monitoring {len(dtdrefs)} permanent simulator variables")
-        if len(dtdrefs) > 0:
-            self.add_simulator_variables_to_monitor(simulator_variables=dtdrefs, reason="permanent simulator variables")
+        self.create_permanent_observables()
+        varnames = self.get_variables()
+        drefs = {}
+        for d in varnames:
+            dref = self.get_variable(d)
+            if dref is not None:
+                drefs[d] = dref
+        logger.info(f"monitoring {len(drefs)} permanent simulator variables")
+        if len(drefs) > 0:
+            self.add_simulator_variables_to_monitor(simulator_variables=drefs, reason="permanent simulator variables")
 
     def clean_simulator_variables_to_monitor(self):
         if not self.connected:
@@ -1550,8 +1603,18 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         self._dref_cache = {}
         logger.debug("done")
 
+    def cleanup_monitored_simulator_variables(self):
+        nolistener = []
+        for d in self.datarefs:
+            dref = self.get_variable(d)
+            if len(dref.listeners) == 0:
+                nolistener.append(d)
+        logger.info(f"no listener for {', '.join(nolistener)}")
+        # self.register_bulk_dataref_value_event(paths=remove, on=False)
+
     def print_currently_monitored_variables(self, with_value: bool = True):
         logger.log(SPAM_LEVEL, ">>>>> currently monitored variables is disabled")
+        self.cleanup_monitored_simulator_variables()
         return
         if with_value:
             values = [f"{d}={self.get_variable(d).value}" for d in self.datarefs]
@@ -1653,11 +1716,13 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
     #
     # Event management
     def add_permanently_monitored_simulator_events(self):
-        # self.create_local_observables() should be called before
+        # self.create_permanent_observables() should be called before
         # like in add_permanently_monitored_simulator_variables()
-        cmds = self.get_permanently_monitored_simulator_events()
+        self.create_permanent_observables()
+        cmds = self.get_events()
         logger.info(f"monitoring {len(cmds)} permanent simulator events")
-        self.add_simulator_events_to_monitor(simulator_events=cmds, reason="permanent simulator events")
+        if len(cmds) > 0:
+            self.add_simulator_events_to_monitor(simulator_events=cmds, reason="permanent simulator events")
 
     def clean_simulator_events_to_monitor(self):
         if not self.connected:
