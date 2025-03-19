@@ -16,11 +16,11 @@ logger = logging.getLogger(__name__)
 
 # XPlaneBeacon-specific error classes
 class XPlaneIpNotFound(Exception):
-    args = "Could not find any running XPlane instance in network"
+    args = tuple("Could not find any running XPlane instance in network")
 
 
 class XPlaneVersionNotSupported(Exception):
-    args = "XPlane version not supported"
+    args = tuple("XPlane version not supported")
 
 
 def list_my_ips() -> List[str]:
@@ -42,6 +42,12 @@ class BEACON_DATA_KW(Enum):
     XPROLE = "role"
 
 
+# Beacon status
+# 0 = Beacon not running
+# 1 = Beacon running
+# 2 = Beacon connected (receives beacon from X-Plane)
+
+
 class XPlaneBeacon:
     """
     Get data from XPlane via network.
@@ -59,15 +65,13 @@ class XPlaneBeacon:
     def __init__(self):
         # Open a UDP Socket to receive on Port 49000
         self.socket = None
-        hostname = socket.gethostname()
-        self.local_ip = socket.gethostbyname(hostname)
         self.beacon_data = {}
         self.should_not_connect: threading.Event | None = None
         self.connect_thread: threading.Thread | None = None
         self._already_warned = 0
-        self.min_version = 0
-        self.max_version = 0
         self._callback = None
+        self.my_ips = list_my_ips()
+        self.status = 0
 
     @property
     def connected(self):
@@ -87,7 +91,7 @@ class XPlaneBeacon:
         if self._callback is not None:
             self._callback(connected)
 
-    def FindIp(self):
+    def find_ip(self):
         """
         Find the IP of XPlane Host in Network.
         It takes the first one it can find.
@@ -179,43 +183,36 @@ class XPlaneBeacon:
         """
         logger.debug("starting..")
         cnt = 0
+        self.status = 1
         while self.should_not_connect is not None and not self.should_not_connect.is_set():
             if not self.connected:
                 try:
-                    self.FindIp()
+                    self.find_ip()
                     if self.connected:
+                        self.status = 2
                         self._already_warned = 0
                         logger.info(f"beacon: {self.beacon_data}")
-                        if BEACON_DATA_KW.XPVERSION.value in self.beacon_data:
-                            curr = self.beacon_data[BEACON_DATA_KW.XPVERSION.value]
-                            if curr < self.min_version:
-                                logger.warning(f"X-Plane version {curr} detected, minimal version is {self.min_version}")
-                                logger.warning("Some features in Cockpitdecks may not work properly")
-                            elif curr > self.max_version:
-                                logger.warning(f"X-Plane version {curr} detected, maximal version is {self.max_version}")
-                                logger.warning("Some features in Cockpitdecks may not work properly")
-                            else:
-                                logger.debug(f"X-Plane version ok ({self.min_version}<= {curr} <={self.max_version})")
-                                logger.info("connected")
-                                logger.info(f"XPlane beacon {'runs locally' if self.same_host() else 'is remote'}")
                         self.callback(True)  # connected
                 except XPlaneVersionNotSupported:
                     self.beacon_data = {}
                     logger.error("..X-Plane Version not supported..")
-                    self.callback(False)  # disconnected
                 except XPlaneIpNotFound:
-                    logger.warning("disconnected")
+                    if self.status == 2:
+                        logger.warning("disconnected")
+                        self.status = 1
+                        self.callback(False)  # disconnected
                     self.beacon_data = {}
                     if cnt % XPlaneBeacon.WARN_FREQ == 0:
                         logger.error(f"..X-Plane instance not found on local network.. ({datetime.now().strftime('%H:%M:%S')})")
                     cnt = cnt + 1
-                    self.callback(False)  # disconnected
                 if not self.connected:
                     self.should_not_connect.wait(XPlaneBeacon.RECONNECT_TIMEOUT)
                     logger.debug("..trying..")
             else:
                 self.should_not_connect.wait(XPlaneBeacon.RECONNECT_TIMEOUT)  # could be n * RECONNECT_TIMEOUT
                 logger.debug("..monitoring connection..")
+        self.status = 0
+        self.callback(False)  # disconnected
         logger.debug("..ended")
 
     # ################################
@@ -227,7 +224,7 @@ class XPlaneBeacon:
         """
         if self.should_not_connect is None:
             self.should_not_connect = threading.Event()
-            self.connect_thread = threading.Thread(target=self.connect_loop, name="XPlaneBeacon::connect_loop")
+            self.connect_thread = threading.Thread(target=self.connect_loop, name="X-Plane Beacon Monitor")
             self.connect_thread.start()
             logger.debug("connect_loop started")
         else:
@@ -247,6 +244,7 @@ class XPlaneBeacon:
             if self.connect_thread.is_alive():
                 logger.warning("..thread may hang..")
             self.should_not_connect = None
+            self.status = 0
             logger.debug("..disconnected")
         else:
             if self.connected:
@@ -255,14 +253,11 @@ class XPlaneBeacon:
             else:
                 logger.debug("..not connected")
 
-    def set_version_control(self, minversion, maxversion):
-        self.min_version = minversion
-        self.max_version = maxversion
-
     def same_host(self) -> bool:
         if self.connected:
-            logger.debug(f"{self.beacon_data[BEACON_DATA_KW.IP.value]} vs. {list_my_ips()}")
-            return self.beacon_data[BEACON_DATA_KW.IP.value] in list_my_ips()
+            r = self.beacon_data[BEACON_DATA_KW.IP.value] in self.my_ips
+            logger.debug(f"{self.beacon_data[BEACON_DATA_KW.IP.value]}{'' if r else ' not'} in {self.my_ips}")
+            return r
         return False
 
 

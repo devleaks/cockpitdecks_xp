@@ -1,0 +1,20 @@
+---
+simulator: X-Plane
+description: Observable. Experimental feature
+version: 1.0.0
+last-updated: 15-MAR-2025
+#
+# CHANGELOG
+#
+# 1.0.0  15-MAR-2025  Initial version
+#
+# OBSERVABLES
+#
+observables:
+  - name: ToLiss autosave on phase
+    type: trigger
+    formula: ${AirbusFBW/ECAMFlightPhase}
+    enabled: true
+    actions:
+      - command: cockpitdecks-info
+        message: Flight phase changed to ${AirbusFBW/ECAMFlightPhase}

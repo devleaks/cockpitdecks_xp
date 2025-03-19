@@ -18,7 +18,7 @@ from simple_websocket import Client, ConnectionClosed
 from packaging.version import Version
 
 from cockpitdecks_xp import __version__
-from cockpitdecks import CONFIG_KW, ENVIRON_KW, SPAM_LEVEL, MONITOR_RESOURCE_USAGE
+from cockpitdecks import CONFIG_KW, ENVIRON_KW, SPAM_LEVEL, DEPRECATION_LEVEL, MONITOR_RESOURCE_USAGE
 from cockpitdecks.strvar import Formula
 from cockpitdecks.instruction import MacroInstruction
 
@@ -80,9 +80,12 @@ REPLAY_DATAREFS = [
     "sim/time/is_in_replay",
     "sim/time/sim_speed",
     "sim/time/sim_speed_actual",
+    "sim/time/paused",
 ]
-
-PERMANENT_SIMULATOR_DATA = {}  # set(DATETIME_DATAREFS + REPLAY_DATAREFS)
+RUNNING_TIME = "sim/time/total_flight_time_sec"  # Total time since the flight got reset by something
+# (let's say time since plane was loaded, reloaded, or changed)
+USEFUL_DATAREFS = [RUNNING_TIME, "sim/time/total_running_time_sec"]  # monitored to determine of cached data is valid  # Total time the sim has been up
+PERMANENT_SIMULATOR_DATA = set(USEFUL_DATAREFS)  # set(DATETIME_DATAREFS + REPLAY_DATAREFS + USEFUL_DATAREFS)
 PERMANENT_SIMULATOR_EVENTS = {}  #
 
 
@@ -148,7 +151,9 @@ class XPRESTObject:
         self.path = path
         self.config = {}
         self.api = None
-        self.valid = False
+        self._valid = False
+        self._cache = None
+        self._last_updated = 0
 
     @property
     def ident(self) -> int | None:
@@ -162,17 +167,30 @@ class XPRESTObject:
             return None
         return self.config.get(REST_KW.VALUE_TYPE.value)
 
+    @property
+    def valid(self) -> bool:
+        if not self._valid:
+            return False
+        if self._cache is None:
+            return False
+        if self._last_updated != self._cache._last_updated:
+            logger.warning(f"{self.path} description expired")
+            self.init(self._cache)
+        return self._valid
+
     def init(self, cache):
         if cache is None:
             return
         self.config = cache.get(self.path)
         self.api = None
-        self.valid = False
+        self._valid = False
         if self.config is None:
             logger.error(f"{type(self)} {self.path} not found")
         else:
             self.api = cache.api
-            self.valid = True
+            self._valid = True
+            self._cache = cache
+            self._last_updated = cache._last_updated
 
 
 # A value in X-Plane Simulator
@@ -330,9 +348,9 @@ class DatarefEvent(SimulatorEvent):
 NOT_A_COMMAND = [
     "none",
     "noop",
-    "no-operation",
-    "no-command",
-    "do-nothing",
+    "nooperation",
+    "nocommand",
+    "donothing",
 ]  # all forced to lower cases, -/:_ removed
 
 
@@ -410,7 +428,7 @@ class XPlaneInstruction(SimulatorInstruction, XPRESTObject):
                         )
 
                     case CONFIG_KW.VIEW.value:
-                        logger.warning("this should no longer be seen... Call it a deprecation warning")
+                        logger.log(DEPRECATION_LEVEL, "«view» command no longer available, use regular command instead")
                         return Command(
                             name=name,
                             simulator=simulator,
@@ -418,7 +436,7 @@ class XPlaneInstruction(SimulatorInstruction, XPRESTObject):
                         )
 
                     case CONFIG_KW.LONG_PRESS.value:
-                        logger.warning("this should no longer be seen... Call it a deprecation warning")
+                        logger.log(DEPRECATION_LEVEL, "long press commands no longer available, use regular command instead")
                         return Command(
                             name=name,
                             simulator=simulator,
@@ -526,13 +544,6 @@ class XPlaneInstruction(SimulatorInstruction, XPRESTObject):
         logger.warning(f"could not find instruction in {instruction_block}")
         return None
 
-    def request(self, url, **kwargs):
-        method = kwargs.get("method", "get")
-        if "json" in kwargs and method == "post":
-            payload = kwargs.get("json")
-            requests.post(url, json=payload)
-            webapi_logger.info(f"executing {self.path}: {url}, {payload}")
-
     def rest_execute(self) -> bool:  # ABC
         return False
 
@@ -544,7 +555,6 @@ class XPlaneInstruction(SimulatorInstruction, XPRESTObject):
             self.rest_execute()
         else:
             self.ws_execute()
-        self.clean_timer()
 
 
 # Instructions to simulator
@@ -565,6 +575,9 @@ class Command(XPlaneInstruction):
         return not self.is_no_operation
 
     def rest_execute(self) -> bool:
+        if not self.is_valid():
+            logger.error(f"command {self.path} is not valid")
+            return False
         if not self.valid:
             self.init(cache=self.simulator.all_commands)
             if not self.valid:
@@ -602,6 +615,9 @@ class BeginEndCommand(Command):
             if not self.valid:
                 logger.error(f"command {self.path} is not valid")
                 return False
+        if not self.is_valid():
+            logger.error(f"command {self.path} is not valid")
+            return False
         payload = {REST_KW.IDENT.value: self.ident, REST_KW.DURATION.value: self.DURATION}
         url = f"{self.simulator.api_url}/command/{self.ident}/activate"
         response = requests.post(url, json=payload)
@@ -737,6 +753,7 @@ class Cache:
         self._data = dict()
         self._ids = dict()
         self._valid = set()
+        self._last_updated = 0
 
     def load(self, path):
         url = self.api.api_url + path
@@ -810,11 +827,12 @@ class XPlaneREST:
 
         self._capabilities = {}
         self._beacon = XPlaneBeacon()
-        self._beacon.set_version_control(minversion=XP_MIN_VERSION, maxversion=XP_MAX_VERSION)
         self._beacon.set_callback(self.beacon_callback)
+        self._running_time = Dataref(path=RUNNING_TIME, simulator=self)  # cheating, side effect, works for rest api
 
         self.all_datarefs: Cache | None = None
         self.all_commands: Cache | None = None
+        self._last_updated = 0
 
     @property
     # See https://stackoverflow.com/questions/7019643/overriding-properties-in-python
@@ -850,7 +868,7 @@ class XPlaneREST:
             if response.status_code == 200:
                 return True
         except requests.exceptions.ConnectionError:
-            logger.error(f"api unreachable, may be X-Plane is not running")
+            logger.warning(f"api unreachable, may be X-Plane is not running")
         except:
             logger.error(f"api unreachable, may be X-Plane is not running", exc_info=True)
         return False
@@ -925,10 +943,14 @@ class XPlaneREST:
                     logger.error("cannot determine api, api not set")
                     return
                 api = sorted(api_versions)[-1]  # takes the latest one, hoping it is the latest in time...
+                try:
+                    api = f"v{max([int(v.replace('v', '')) for v in api_versions])}"
+                except:
+                    pass
                 logger.info(f"selected latest api {api} ({sorted(api_versions)})")
             if api in api_versions:
                 self.version = api
-                self._api_version = "/" + api
+                self._api_version = f"/{api}"
                 logger.info(f"set api {api}, xp {self.xp_version}")
             else:
                 logger.warning(f"no api {api} in {api_versions}")
@@ -936,14 +958,23 @@ class XPlaneREST:
         logger.warning(f"could not check api {api} in {capabilities}")
 
     def reload_caches(self):
+        MAX_TIME = 10
+        if self._last_updated != 0:
+            difftime = self._running_time.rest_value - self._last_updated
+            if difftime < 10:
+                logger.info(f"dataref cache not updated, updated {round(difftime, 1)} secs. ago")
+                return
         self.all_datarefs = Cache(self)
         self.all_datarefs.load("/datarefs")
-        # self.all_datarefs.save("datarefs.json")
+        self.all_datarefs.save("webapi-datarefs.json")
         self.all_commands = Cache(self)
         if self.version == "v2":  # >
             self.all_commands.load("/commands")
-            # self.all_commands.save("commands.json")
-        logger.info(f"dataref cache ({len(self.all_datarefs._data)}) and command cache ({len(self.all_commands._data)}) reloaded")
+            self.all_commands.save("webapi-commands.json")
+        self._last_updated = self._running_time.rest_value
+        logger.info(
+            f"dataref cache ({len(self.all_datarefs._data)}) and command cache ({len(self.all_commands._data)}) reloaded ({round(self._last_updated, 1)})"
+        )
 
     def get_dataref_info_by_name(self, path: str):
         return self.all_datarefs.get_by_name(path) if self.all_datarefs is not None else None
@@ -1050,12 +1081,14 @@ class XPlaneWebSocket(XPlaneREST, ABC):
         WARN_FREQ = 10
         number_of_timeouts = 0
         cnt = 0
+        self.set_internal_variable(name=COCKPITDECKS_INTVAR.INTDREF_CONNECTION_STATUS.value, value=1, cascade=True)
         while self.should_not_connect is not None and not self.should_not_connect.is_set():
             if not self.connected:
                 try:
                     logger.info("not connected, trying..")
                     self.connect_websocket()
                     if self.connected:
+                        self.set_internal_variable(name=COCKPITDECKS_INTVAR.INTDREF_CONNECTION_STATUS.value, value=2, cascade=True)
                         self._already_warned = 0
                         number_of_timeouts = 0
                         logger.info(f"capabilities: {self.capabilities()}")
@@ -1101,6 +1134,7 @@ class XPlaneWebSocket(XPlaneREST, ABC):
                 # Connection is OK, we wait before checking again
                 self.should_not_connect.wait(RECONNECT_TIMEOUT)  # could be n * RECONNECT_TIMEOUT
                 logger.debug("..monitoring connection..")
+        self.set_internal_variable(name=COCKPITDECKS_INTVAR.INTDREF_CONNECTION_STATUS.value, value=0, cascade=True)
         logger.debug("..ended connection monitor")
 
     # ################################
@@ -1316,6 +1350,14 @@ class XPlaneWebSocket(XPlaneREST, ABC):
     @abstractmethod
     def start(self):
         raise NotImplementedError
+
+
+# Connector to X-Plane status (COCKPITDECKS_INTVAR.INTDREF_CONNECTION_STATUS)
+# 0 = Connection monitor to X-Plane is not running
+# 1 = Connection monitor to X-Plane running, not connected to websocket
+# 2 = Connected to websocket, WS receiver not running
+# 3 = Connected to websocket, WS receiver running
+# 4 = WS receiver has received data from simulator
 
 
 # #############################################
@@ -1846,7 +1888,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
                                         # Arrays
                                         # Whole array
                                         if len(dref[INDICES]) == 0:
-                                            v = dref_round_arr(value)
+                                            v = dref_round_arr(local_path=d, local_value=value)
                                             if d not in self._dref_cache or self._dref_cache[d] != v:  # cached rounded value
                                                 cascade = d in self.simulator_variable_to_monitor.keys()
                                                 webapi_logger.info(f"DREF WHOLE ARRAY: {d} {self._dref_cache.get(d)} -> {v} (cascade={cascade})")
