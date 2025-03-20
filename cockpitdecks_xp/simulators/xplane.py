@@ -966,10 +966,14 @@ class XPlaneREST:
     def reload_caches(self):
         MAX_TIME = 10
         if self._last_updated != 0:
-            difftime = self._running_time.rest_value - self._last_updated
-            if difftime < 10:
-                logger.info(f"dataref cache not updated, updated {round(difftime, 1)} secs. ago")
-                return
+            currtime = self._running_time.rest_value
+            if currtime is not None:
+                difftime = self._running_time.rest_value - self._last_updated
+                if difftime < 10:
+                    logger.info(f"dataref cache not updated, updated {round(difftime, 1)} secs. ago")
+                    return
+            else:
+                logger.warning(f"no value for sim/time/total_running_time_sec")
         self.all_datarefs = Cache(self)
         self.all_datarefs.load("/datarefs")
         self.all_datarefs.save("webapi-datarefs.json")
@@ -1188,7 +1192,8 @@ class XPlaneWebSocket(XPlaneREST, ABC):
     # I/O
     #
     # Generic payload "send" function, unique
-    def send(self, payload: dict) -> int:
+    def send(self, payload: dict, mapping: dict = {}) -> int:
+        # Mapping is correspondance dataref_index=dataref_name
         if self.connected:
             if payload is not None and len(payload) > 0:
                 req_id = self.next_req
@@ -1196,6 +1201,9 @@ class XPlaneWebSocket(XPlaneREST, ABC):
                 self._requests[req_id] = None
                 self.ws.send(json.dumps(payload))
                 webapi_logger.info(f">>SENT {payload}")
+                if len(mapping) > 0:
+                    maps = [f"{k}={v}" for k, v in mapping.items()]
+                    webapi_logger.info(f">> MAP {', '.join(maps)}")
                 return req_id
             else:
                 logger.warning("no payload")
@@ -1249,9 +1257,10 @@ class XPlaneWebSocket(XPlaneREST, ABC):
             REST_KW.TYPE.value: "dataref_set_values",
             REST_KW.PARAMS.value: {REST_KW.DATAREFS.value: [{REST_KW.IDENT.value: dref[REST_KW.IDENT.value], REST_KW.VALUE.value: value}]},
         }
+        mapping = {dref[REST_KW.IDENT.value]: dref[REST_KW.NAME.value]}
         if split:
             payload[REST_KW.PARAMS.value][REST_KW.DATAREFS.value][0][REST_KW.INDEX.value] = index
-        return self.send(payload)
+        return self.send(payload, mapping)
 
     def register_dataref_value_event(self, path: str, on: bool = True) -> int:
         split, dref, name, index = self.split_dataref_path(path)
@@ -1262,21 +1271,24 @@ class XPlaneWebSocket(XPlaneREST, ABC):
             REST_KW.TYPE.value: "dataref_subscribe_values" if on else "dataref_unsubscribe_values",
             REST_KW.PARAMS.value: {REST_KW.DATAREFS.value: [{REST_KW.IDENT.value: dref[REST_KW.IDENT.value], REST_KW.VALUE.value: value}]},
         }
+        mapping = {dref[REST_KW.IDENT.value]: dref[REST_KW.NAME.value]}
         if split:
             payload[REST_KW.PARAMS.value][REST_KW.DATAREFS.value][0][REST_KW.INDEX.value] = index
             if on:
                 self.append_index(dref, index)
             else:
                 self.remove_index(dref, index)
-        return self.send(payload)
+        return self.send(payload, mapping)
 
     def register_bulk_dataref_value_event(self, paths, on: bool = True) -> int:
         drefs = []
+        mapping = {}
         for path in paths:
             split, dref, name, index = self.split_dataref_path(path)
             if dref is None:
                 logger.warning(f"dataref {path} not found in X-Plane datarefs database")
                 continue
+            mapping[dref[REST_KW.IDENT.value]] = dref[REST_KW.NAME.value]
             if split:
                 drefs.append({REST_KW.IDENT.value: dref[REST_KW.IDENT.value], REST_KW.INDEX.value: index})
                 if on:
@@ -1288,7 +1300,7 @@ class XPlaneWebSocket(XPlaneREST, ABC):
 
         if len(drefs) > 0:
             action = "dataref_subscribe_values" if on else "dataref_unsubscribe_values"
-            return self.send({REST_KW.TYPE.value: action, REST_KW.PARAMS.value: {REST_KW.DATAREFS.value: drefs}})
+            return self.send({REST_KW.TYPE.value: action, REST_KW.PARAMS.value: {REST_KW.DATAREFS.value: drefs}}, mapping)
         action = "register" if on else "unregister"
         logger.warning(f"no bulk datarefs to {action}")
         return -1
@@ -1296,25 +1308,28 @@ class XPlaneWebSocket(XPlaneREST, ABC):
     # Command operations
     #
     def register_command_is_active_event(self, path: str, on: bool = True) -> int:
-        cmd = self.get_command_info_by_name(path)
-        if cmd is not None:
+        cmdref = self.get_command_info_by_name(path)
+        if cmdref is not None:
+            mapping = {cmdref[REST_KW.IDENT.value]: cmdref[REST_KW.NAME.value]}
             action = "command_subscribe_is_active" if on else "command_unsubscribe_is_active"
-            return self.send({REST_KW.TYPE.value: action, REST_KW.PARAMS.value: {REST_KW.COMMANDS.value: [{REST_KW.IDENT.value: cmd[REST_KW.IDENT.value]}]}})
+            return self.send({REST_KW.TYPE.value: action, REST_KW.PARAMS.value: {REST_KW.COMMANDS.value: [{REST_KW.IDENT.value: cmdref[REST_KW.IDENT.value]}]}}, mapping)
         logger.warning(f"command {path} not found in X-Plane commands database")
         return -1
 
     def register_bulk_command_is_active_event(self, paths, on: bool = True) -> int:
         cmds = []
+        mapping = {}
         for path in paths:
             cmdref = self.get_command_info_by_name(path=path)
             if cmdref is None:
                 logger.warning(f"command {path} not found in X-Plane commands database")
                 continue
             cmds.append({REST_KW.IDENT.value: cmdref[REST_KW.IDENT.value]})
+            mapping[cmdref[REST_KW.IDENT.value]] = cmdref[REST_KW.NAME.value]
 
         if len(cmds) > 0:
             action = "command_subscribe_is_active" if on else "command_unsubscribe_is_active"
-            return self.send({REST_KW.TYPE.value: action, REST_KW.PARAMS.value: {REST_KW.COMMANDS.value: cmds}})
+            return self.send({REST_KW.TYPE.value: action, REST_KW.PARAMS.value: {REST_KW.COMMANDS.value: cmds}}, mapping)
         action = "register" if on else "unregister"
         logger.warning(f"no bulk command active to {action}")
         return -1
@@ -1613,6 +1628,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         # self.register_bulk_dataref_value_event(paths=remove, on=False)
 
     def print_currently_monitored_variables(self, with_value: bool = True):
+        return
         logger.log(SPAM_LEVEL, ">>>>> currently monitored variables is disabled")
         self.cleanup_monitored_simulator_variables()
         return
