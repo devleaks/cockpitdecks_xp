@@ -964,16 +964,16 @@ class XPlaneREST:
         logger.warning(f"could not check api {api} in {capabilities}")
 
     def reload_caches(self):
-        MAX_TIME = 10
+        MINTIME_BETWEEN_RELOAD = 10  # seconds
         if self._last_updated != 0:
             currtime = self._running_time.rest_value
             if currtime is not None:
-                difftime = self._running_time.rest_value - self._last_updated
-                if difftime < 10:
+                difftime = currtime - self._last_updated
+                if difftime < MINTIME_BETWEEN_RELOAD:
                     logger.info(f"dataref cache not updated, updated {round(difftime, 1)} secs. ago")
                     return
             else:
-                logger.warning(f"no value for sim/time/total_running_time_sec")
+                logger.warning("no value for sim/time/total_running_time_sec")
         self.all_datarefs = Cache(self)
         self.all_datarefs.load("/datarefs")
         self.all_datarefs.save("webapi-datarefs.json")
@@ -981,7 +981,11 @@ class XPlaneREST:
         if self.version == "v2":  # >
             self.all_commands.load("/commands")
             self.all_commands.save("webapi-commands.json")
-        self._last_updated = self._running_time.rest_value
+        currtime = self._running_time.rest_value
+        if currtime is not None:
+            self._last_updated = self._running_time.rest_value
+        else:
+            logger.warning("no value for sim/time/total_running_time_sec")
         logger.info(
             f"dataref cache ({len(self.all_datarefs._data)}) and command cache ({len(self.all_commands._data)}) reloaded ({round(self._last_updated, 1)})"
         )
