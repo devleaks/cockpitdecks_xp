@@ -17,8 +17,6 @@ observables:
     enabled: True
     dataref: sim/aircraft/view/acf_relative_path
     actions:
-      - command: cockpitdecks-aircraft
-        delay: 5
       - set-dataref: data:aircraft-name
         text: ${sim/aircraft/view/acf_relative_path}
   - name: Aircraft ICAO changed
@@ -26,8 +24,6 @@ observables:
     enabled: True
     dataref: sim/aircraft/view/acf_ICAO
     actions:
-      - command: cockpitdecks-aircraft-icao
-        delay: 2
       - set-dataref: data:aircraft-icao
         text: ${sim/aircraft/view/acf_ICAO}
   - name: Livery changed
@@ -35,18 +31,8 @@ observables:
     enabled: True
     dataref: sim/aircraft/view/acf_livery_path
     actions:
-      - command: cockpitdecks-livery
-        delay: 5
       - set-dataref: data:livery-name
         text: ${sim/aircraft/view/acf_livery_path}
-  # # Test change cascade
-  # - name: Livery Index Changed
-  #   type: onchange
-  #   enabled: True
-  #   dataref: sim/aircraft/view/acf_livery_index
-  #   actions:
-  #     - set-dataref: data:livery-index
-  #       text: ${sim/aircraft/view/acf_livery_index}
   # Demo of command active event
   - name: QNH adjusted
     type: event

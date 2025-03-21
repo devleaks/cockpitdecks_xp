@@ -417,10 +417,7 @@ class XPlaneInstruction(SimulatorInstruction, XPRESTObject):
                         # Parse instruction_block to get values
                         # to do: If no value to set, use value of parent dataref (dataref in parent block)
                         return SetDataref(
-                            simulator=simulator,
-                            path=command_block,
-                            formula=instruction_block.get("formula"),
-                            text_value=instruction_block.get("text")
+                            simulator=simulator, path=command_block, formula=instruction_block.get("formula"), text_value=instruction_block.get("text")
                         )
 
                     case CONFIG_KW.COMMAND.value:
@@ -645,7 +642,16 @@ class SetDataref(XPlaneInstruction):
     Instruction to update the value of a dataref in X-Plane simulator.
     """
 
-    def __init__(self, simulator: XPlane, path: str, value=None, formula: str | None = None, text_value: str | None = None, delay: float = 0.0, condition: str | None = None):
+    def __init__(
+        self,
+        simulator: XPlane,
+        path: str,
+        value=None,
+        formula: str | None = None,
+        text_value: str | None = None,
+        delay: float = 0.0,
+        condition: str | None = None,
+    ):
         XPlaneInstruction.__init__(self, name=path, simulator=simulator, delay=delay, condition=condition)
         self.path = path  # some/dataref/to/set
         self._variable = simulator.get_variable(path)
@@ -726,6 +732,7 @@ class SetDataref(XPlaneInstruction):
             self._variable.update_value(new_value=self.value, cascade=True)
         else:
             super()._execute()
+
 
 # Events from simulator
 #
@@ -1341,7 +1348,9 @@ class XPlaneWebSocket(XPlaneREST, ABC):
         if cmdref is not None:
             mapping = {cmdref[REST_KW.IDENT.value]: cmdref[REST_KW.NAME.value]}
             action = "command_subscribe_is_active" if on else "command_unsubscribe_is_active"
-            return self.send({REST_KW.TYPE.value: action, REST_KW.PARAMS.value: {REST_KW.COMMANDS.value: [{REST_KW.IDENT.value: cmdref[REST_KW.IDENT.value]}]}}, mapping)
+            return self.send(
+                {REST_KW.TYPE.value: action, REST_KW.PARAMS.value: {REST_KW.COMMANDS.value: [{REST_KW.IDENT.value: cmdref[REST_KW.IDENT.value]}]}}, mapping
+            )
         logger.warning(f"command {path} not found in X-Plane commands database")
         return -1
 
