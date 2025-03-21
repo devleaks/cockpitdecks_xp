@@ -20,17 +20,13 @@ from packaging.version import Version
 
 from cockpitdecks_xp import __version__
 from cockpitdecks import CONFIG_KW, ENVIRON_KW, SPAM_LEVEL, DEPRECATION_LEVEL, MONITOR_RESOURCE_USAGE, RESOURCES_FOLDER, OBSERVABLES_FILE, yaml
-from cockpitdecks.strvar import Formula
+from cockpitdecks.strvar import StringWithVariables, Formula
 from cockpitdecks.instruction import MacroInstruction
 
 from cockpitdecks.simulator import Simulator, SimulatorEvent, SimulatorInstruction
 from cockpitdecks.simulator import SimulatorVariable, SimulatorVariableListener
 from cockpitdecks.resources.intvariables import COCKPITDECKS_INTVAR
 from cockpitdecks.observable import Observables
-
-from ..resources.stationobs import WeatherStationObservable
-from ..resources.daytimeobs import DaytimeObservable
-from ..resources.cmdlsnr import MapCommandObservable
 
 from .beacon import XPlaneBeacon, BEACON_DATA_KW
 
@@ -87,7 +83,7 @@ REPLAY_DATAREFS = [
 ]
 RUNNING_TIME = "sim/time/total_flight_time_sec"  # Total time since the flight got reset by something
 # (let's say time since plane was loaded, reloaded, or changed)
-USEFUL_DATAREFS = [RUNNING_TIME, "sim/time/total_running_time_sec"]  # monitored to determine of cached data is valid  # Total time the sim has been up
+USEFUL_DATAREFS = []  # monitored to determine of cached data is valid  # Total time the sim has been up
 
 PERMANENT_SIMULATOR_VARIABLES = set(USEFUL_DATAREFS)  # set(DATETIME_DATAREFS + REPLAY_DATAREFS + USEFUL_DATAREFS)
 PERMANENT_SIMULATOR_EVENTS = {}  #
@@ -418,10 +414,13 @@ class XPlaneInstruction(SimulatorInstruction, XPRESTObject):
                         return BeginEndCommand(name=name, simulator=simulator, path=command_block)
 
                     case CONFIG_KW.SET_SIM_VARIABLE.value:
+                        # Parse instruction_block to get values
+                        # to do: If no value to set, use value of parent dataref (dataref in parent block)
                         return SetDataref(
-                            name=name,
                             simulator=simulator,
                             path=command_block,
+                            formula=instruction_block.get("formula"),
+                            text_value=instruction_block.get("text")
                         )
 
                     case CONFIG_KW.COMMAND.value:
@@ -646,22 +645,43 @@ class SetDataref(XPlaneInstruction):
     Instruction to update the value of a dataref in X-Plane simulator.
     """
 
-    def __init__(self, simulator: XPlane, path: str, value=None, formula: str | None = None, delay: float = 0.0, condition: str | None = None):
+    def __init__(self, simulator: XPlane, path: str, value=None, formula: str | None = None, text_value: str | None = None, delay: float = 0.0, condition: str | None = None):
         XPlaneInstruction.__init__(self, name=path, simulator=simulator, delay=delay, condition=condition)
-        self.path = path  # some/command
+        self.path = path  # some/dataref/to/set
+        self._variable = simulator.get_variable(path)
+
+        # Generic, non computed static fixed value
         self._value = value
+
+        # Formula are for numeric value
         self._formula = formula
         self.formula = None
         if self._formula is not None:
             self.formula = Formula(owner=simulator, formula=formula)  # no button, no formula?
 
+        # Text value are for string
+        self._text_value = text_value
+        self.text_value = None
+        if self._text_value is not None:
+            self.text_value = StringWithVariables(owner=simulator, message=self._text_value, name=f"{type(self).__name__}({self.path})")
+        if self.formula is not None and self.text_value is not None:
+            logger.warning(f"{type(self).__name__} for {self.path} has both formula and text value")
+
     def __str__(self) -> str:
         return "set-dataref: " + self.name
 
     @property
+    def is_internal(self):
+        return self._variable.is_internal
+
+    @property
     def value(self):
         if self.formula is not None:
+            if self.text_value is not None:
+                logger.warning(f"{type(self).__name__} for {self.path} has both formula and text value, returning formula (text value ignored)")
             return self.formula.value
+        if self.text_value is not None:
+            return self.text_value.value
         return self._value
 
     @value.setter
@@ -701,6 +721,11 @@ class SetDataref(XPlaneInstruction):
             return -1
         return self.simulator.set_dataref_value(path=self.path, value=self.value)
 
+    def _execute(self):
+        if self.is_internal:
+            self._variable.update_value(new_value=self.value, cascade=True)
+        else:
+            super()._execute()
 
 # Events from simulator
 #
