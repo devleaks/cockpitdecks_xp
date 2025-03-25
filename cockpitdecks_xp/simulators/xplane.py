@@ -113,7 +113,7 @@ class REST_KW(Enum):
     VALUE_TYPE = "value_type"
 
 
-# value_type: float, double, int, int_array, float_array, data
+# DATAREF VALUE TYPES
 class DATAREF_DATATYPE(Enum):
     INTEGER = "int"
     FLOAT = "float"
@@ -131,7 +131,6 @@ class REST_RESPONSE(Enum):
 
 
 # A value in X-Plane Simulator
-# value_type: float, double, int, int_array, float_array, data
 #
 class Dataref(SimulatorVariable):
     """
@@ -142,13 +141,11 @@ class Dataref(SimulatorVariable):
     def __init__(self, path: str, simulator: XPlane, is_string: bool = False):
         # Data
         SimulatorVariable.__init__(self, name=path, simulator=simulator, data_type="string" if is_string else "float")
-        self.meta = None
-        self._meta_cache = None
-
         self._monitored = 0
 
+        # path with array index sim/some/values[4]
         self.path = path
-        self.index = None  # sign is it not an array
+        self.index = None  # sign is it not a selected array element
         if "[" in path:
             self.path = self.name[: self.name.find("[")]  # sim/some/values
             self.index = int(self.name[self.name.find("[") + 1 : self.name.find("]")])  # 4
@@ -159,23 +156,15 @@ class Dataref(SimulatorVariable):
         else:
             return f"{self.path}={self.value}"
 
-    def init(self):
-        if self.meta is not None:
-            if not self.meta.expired(self.simulator.all_datarefs):
-                return self.meta
-
-        self._meta_cache = self.simulator.all_datarefs
-        if self._meta_cache is None:
-            logger.warning(f"dataref {self.path} no cache")
-            return
-        # need to check with updates
-        self.meta = self._meta_cache.get(self.path)
-        if self.meta is None:
-            logger.error(f"dataref {self.path} not found in cache")
+    @property
+    def meta(self):
+        r = self.simulator.all_datarefs.get(self.path) if self.simulator.all_datarefs is not None else None
+        if r is None:
+            logger.error(f"dataref {self.path} hos no api meta data")
+        return r
 
     @property
     def valid(self) -> bool:
-        self.init()
         return self.meta is not None
 
     @property
@@ -197,14 +186,14 @@ class Dataref(SimulatorVariable):
         if not self.valid:
             logger.error(f"dataref {self.path} not valid")
             return False
-        return self.config.get(REST_KW.ISWRITABLE.value)
+        return self.meta.is_writable
 
     @property
     def is_array(self) -> bool:
         if not self.valid:
             logger.error(f"dataref {self.path} not valid")
             return False
-        return self.value_type in ["int_array", "float_array"]
+        return self.value_type in [DATAREF_DATATYPE.INTARRAY.value, DATAREF_DATATYPE.FLOATARRAY.value]
 
     @property
     def selected_indices(self) -> bool:
@@ -292,18 +281,12 @@ class Dataref(SimulatorVariable):
             return False
         return self._write()
 
-    def split_path(self):
-        if not self.valid:
-            logger.error(f"dataref {self.path} not valid")
-            return False
-        return ("[" in self.name and "]" in self.name), self.config, self.path, self.index
-
     def parse_raw_value(self, raw_value):
         if not self.valid:
             logger.error(f"dataref {self.path} not valid")
             return False
 
-        if self.value_type in ["int_array", "float_array"]:
+        if self.value_type in [DATAREF_DATATYPE.INTARRAY.value, DATAREF_DATATYPE.FLOATARRAY.value]:
             # 1. Arrays
             # 1.1 Whole array
             if len(self.meta.indices) == 0:
@@ -404,26 +387,16 @@ class XPlaneInstruction(SimulatorInstruction):
 
     def __init__(self, name: str, simulator: XPlane, delay: float = 0.0, condition: str | None = None, button: "Button" = None) -> None:
         SimulatorInstruction.__init__(self, name=name, simulator=simulator, delay=delay, condition=condition)
-        self.meta = None
-        self._meta_cache = None
 
-    def init(self):
-        if self.meta is not None:
-            if not self.meta.expired(self.simulator.all_commands):
-                return self.meta
-
-        self._meta_cache = self.simulator.all_commands
-        if self._meta_cache is None:
-            logger.warning(f"command {self.path} no cache")
-            return
-        # need to check with updates
-        self.meta = self._meta_cache.get(self.path)
-        if self.meta is None:
-            logger.error(f"command {self.path} not found")
+    @property
+    def meta(self):
+        r = self.simulator.all_commands.get(self.path) if self.simulator.all_commands is not None else None
+        if r is None:
+            logger.error(f"dataref {self.path} hos no api meta data")
+        return r
 
     @property
     def valid(self) -> bool:
-        self.init()
         return self.meta is not None
 
     @property
@@ -437,7 +410,7 @@ class XPlaneInstruction(SimulatorInstruction):
     def description(self) -> bool | None:
         if not self.valid:
             return None
-        return self.config.get(REST_KW.DESCRIPTION.value)
+        return self.meta.description
 
     @property
     def use_rest(self):
@@ -850,8 +823,6 @@ class DatarefMeta:
         self.is_writable = is_writable
         self.indices = list()
 
-        self.last_cached = 0
-
         self.updates = 0
         self._previous_value = None
         self._current_value = None
@@ -866,12 +837,9 @@ class DatarefMeta:
         self._current_value = value
         self.updates = self.updates + 1
 
-    def expired(self, cache) -> bool:
-        return self.last_cached < cache.last_cached
-
     @property
     def is_array(self) -> bool:
-        return self.value_type in ["int_array", "float_array"]
+        return self.value_type in [DATAREF_DATATYPE.INTARRAY.value, DATAREF_DATATYPE.FLOATARRAY.value]
 
     def append_index(self, i):
         if i not in self.indices:
@@ -880,6 +848,7 @@ class DatarefMeta:
     def remove_index(self, i):
         self.indices.remove(i)
 
+
 class CommandMeta:
 
     def __init__(self, name: str, description: str, **kwargs) -> None:
@@ -887,10 +856,6 @@ class CommandMeta:
         self.ident = kwargs.get("id")
         self.description = description
 
-        self.last_cached = 0
-
-    def expired(self, cache) -> bool:
-        return self.last_cached < cache.last_cached
 
 class APIMeta:
 
@@ -919,10 +884,6 @@ class Cache:
         self._last_updated = 0
 
     def load(self, path):
-        def ts(m, t):
-            m.last_cached = t
-            return m
-
         url = self.api.api_url + path
         response = requests.get(url)
         if response.status_code != 200:  # We have version 12.1.4 or above
@@ -933,10 +894,7 @@ class Cache:
         self._raw = data
 
         metas = [APIMeta.new(**c) for c in data]
-        last_cached = datetime.now().timestamp()
-        map(lambda m: ts(m, last_cached), metas)
-
-        self.last_cached = last_cached
+        self.last_cached = datetime.now().timestamp()
         self._by_name = {m.name: m for m in metas}
         self._by_ids = {m.ident: m for m in metas}
 
@@ -1152,9 +1110,7 @@ class XPlaneREST:
             self._last_updated = self._running_time.rest_value
         else:
             logger.warning("no value for sim/time/total_running_time_sec")
-        logger.info(
-            f"dataref cache ({self.all_datarefs.count}) and command cache ({self.all_commands.count}) reloaded ({round(self._last_updated, 1)})"
-        )
+        logger.info(f"dataref cache ({self.all_datarefs.count}) and command cache ({self.all_commands.count}) reloaded ({round(self._last_updated, 1)})")
 
     def get_dataref_meta_by_name(self, path: str) -> DatarefMeta | None:
         return self.all_datarefs.get_by_name(path) if self.all_datarefs is not None else None
@@ -1283,7 +1239,7 @@ class XPlaneWebSocket(XPlaneREST, ABC):
                                 logger.warning(f"X-Plane version {curr} detected, maximal version is {xpmax}")
                                 logger.warning("Some features in Cockpitdecks may not work properly")
                             else:
-                                logger.info(f"X-Plane version meets current version criteria ({xpmin}<= {curr} <={xpmax})")
+                                logger.info(f"X-Plane version ok ({xpmin}<= {curr} <={xpmax})")
                         logger.debug("..connected, starting websocket listener..")
                         self.start()
                         # self.inc(COCKPITDECKS_INTVAR.STARTS.value)
@@ -1441,9 +1397,7 @@ class XPlaneWebSocket(XPlaneREST, ABC):
         if cmdref is not None:
             mapping = {cmdref.ident: cmdref.name}
             action = "command_subscribe_is_active" if on else "command_unsubscribe_is_active"
-            return self.send(
-                {REST_KW.TYPE.value: action, REST_KW.PARAMS.value: {REST_KW.COMMANDS.value: [{REST_KW.IDENT.value: cmdref.ident}]}}, mapping
-            )
+            return self.send({REST_KW.TYPE.value: action, REST_KW.PARAMS.value: {REST_KW.COMMANDS.value: [{REST_KW.IDENT.value: cmdref.ident}]}}, mapping)
         logger.warning(f"command {path} not found in X-Plane commands database")
         return -1
 
@@ -1472,9 +1426,7 @@ class XPlaneWebSocket(XPlaneREST, ABC):
                 {
                     REST_KW.TYPE.value: "command_set_is_active",
                     REST_KW.PARAMS.value: {
-                        REST_KW.COMMANDS.value: [
-                            {REST_KW.IDENT.value: cmdref.ident, REST_KW.ISACTIVE.value: True, REST_KW.DURATION.value: duration}
-                        ]
+                        REST_KW.COMMANDS.value: [{REST_KW.IDENT.value: cmdref.ident, REST_KW.ISACTIVE.value: True, REST_KW.DURATION.value: duration}]
                     },
                 }
             )
@@ -1760,15 +1712,15 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         # self.register_bulk_dataref_value_event(datarefs=nolistener, on=False)
 
     def print_currently_monitored_variables(self, with_value: bool = True):
-        return
-        logger.log(SPAM_LEVEL, ">>>>> currently monitored variables is disabled")
-        self.cleanup_monitored_simulator_variables()
-        return
-        if with_value:
-            values = [f"{k}: {d.name}={d.value}" for k, d in self._dataref_by_id.items()]
-            logger.log(SPAM_LEVEL, f">>>>> currently monitored variables:\n{'\n'.join(sorted(values))}")
-            return
-        logger.log(SPAM_LEVEL, f">>>>> currently monitored variables:\n{'\n'.join(sorted([d.name for d in self._dataref_by_id.values()]))}")
+        pass
+        # logger.log(SPAM_LEVEL, ">>>>> currently monitored variables is disabled")
+        # self.cleanup_monitored_simulator_variables()
+        # return
+        # if with_value:
+        #     values = [f"{k}: {d.name}={d.value}" for k, d in self._dataref_by_id.items()]
+        #     logger.log(SPAM_LEVEL, f">>>>> currently monitored variables:\n{'\n'.join(sorted(values))}")
+        #     return
+        # logger.log(SPAM_LEVEL, f">>>>> currently monitored variables:\n{'\n'.join(sorted([d.name for d in self._dataref_by_id.values()]))}")
 
     def add_simulator_variables_to_monitor(self, simulator_variables, reason: str | None = None):
         if not self.connected:
@@ -1893,7 +1845,8 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         logger.debug("done")
 
     def print_currently_monitored_events(self):
-        logger.log(SPAM_LEVEL, f">>>>> currently monitored events:\n{'\n'.join(sorted(self.cmdevents))}")
+        pass
+        # logger.log(SPAM_LEVEL, f">>>>> currently monitored events:\n{'\n'.join(sorted(self.cmdevents))}")
 
     def add_simulator_events_to_monitor(self, simulator_events, reason: str | None = None):
         if not self.connected:
@@ -2066,13 +2019,14 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
                             logger.warning(f"no data: {data}")
                             continue
 
-                        for cidx, value in data[REST_KW.DATA.value].items():
-                            meta = self.get_command_meta_by_id(int(cidx))
+                        for ident, value in data[REST_KW.DATA.value].items():
+                            meta = self.get_command_meta_by_id(int(ident))
                             if meta is not None:
-                                cmdname = meta.name
-                                webapi_logger.info(f"CMD : {cmdname}={value}")
-                                e = CommandActiveEvent(sim=self, command=cmdname, is_active=value, cascade=True)
+                                webapi_logger.info(f"CMD : {meta.name}={value}")
+                                e = CommandActiveEvent(sim=self, command=meta.name, is_active=value, cascade=True)
                                 self.inc(COCKPITDECKS_INTVAR.COMMAND_ACTIVE_ENQUEUED.value)
+                            else:
+                                logger.warning(f"no command for id={self.all_commands.equiv(ident=int(ident))}")
                     #
                     #
                     elif resp_type == REST_RESPONSE.DATAREF_UPDATE.value:
@@ -2082,29 +2036,22 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
                             logger.warning(f"no data: {data}")
                             continue
 
-                        for didx, value in data[REST_KW.DATA.value].items():
-                            dataref = self._dataref_by_id.get(int(didx))
+                        for ident, value in data[REST_KW.DATA.value].items():
+                            dataref = self._dataref_by_id.get(int(ident))
                             if dataref is None:
-                                logger.warning(f"no dataref for id={didx}")
+                                logger.warning(f"no dataref for id={self.all_datarefs.equiv(ident=int(ident))}")
                                 continue
 
-                            if dataref.name not in [
-                                "sim/time/zulu_time_sec",
-                                "sim/flightmodel/position/latitude",
-                                "sim/flightmodel/position/longitude",
-                            ]:
-                                print("***>>", didx, dataref.name, dataref.value)
-
                             if dataref.is_array:
-                                # There are two possible cases:
+                                # There are two possible cases for array datarefs:
                                 # 1. We requested the whole array of value: AirbuFBW/HUDBrightnessRheo
                                 # 2. We requested one or more values from the array: AirbuFBW/HUDBrightnessRheo[0], AirbuFBW/HUDBrightnessRheo[3]
                                 # In first case we get all values back:
                                 # R1:  AirbuFBW/HUDBrightnessRheo = [1, 2, 3, 4, 5, 6, 7, 8]
                                 # R2:  AirbuFBW/HUDBrightnessRheo = [1, 4], and we have to remember in Dataref.meta.indices = [0, 3] (requested array indices)
                                 # In both case, Dataref.meta is for AirbuFBW/HUDBrightnessRheo.
-                                # 1. meta.indices = []
-                                # 2. meta.indices = [0, 3]
+                                # 1. meta.indices = [], meaning whole array
+                                # 2. meta.indices = [0, 3], list of requested array, in order as requested
                                 #
                                 # 1. Arrays
                                 # 1.a Whole array
@@ -2114,20 +2061,22 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
                                     e = DatarefEvent(sim=self, dataref=dataref.name, value=value, cascade=cascade)  # send raw value if possible
                                     self.inc(COCKPITDECKS_INTVAR.UPDATE_ENQUEUED.value)
                                     continue
-
+                                #
                                 # 1.b Single array element
+                                # First check for consistency
                                 if len(value) != len(dataref.meta.indices):
                                     logger.warning(f"dataref array {dataref.name} size mismatch ({len(value)}/{len(dataref.meta.indices)})")
                                     logger.warning(f"dataref array {dataref.name}: value: {value}, indices: {dataref.meta.indices})")
                                     continue
-                                for v1, idx in zip(value, dataref.meta.indices):
+                                # Second, we have to update each element in the array
+                                for idx, v1 in zip(dataref.meta.indices, value):
                                     d1 = f"{dataref.name}[{idx}]"
                                     cascade = d1 in self.simulator_variable_to_monitor.keys()
                                     webapi_logger.info(f"DREF ARRAY: {d1} = {v1} (cascade={cascade})")
                                     e = DatarefEvent(sim=self, dataref=d1, value=v1, cascade=cascade)
                                     self.inc(COCKPITDECKS_INTVAR.UPDATE_ENQUEUED.value)
-                                    continue
                             else:
+                                #
                                 # 2. Scalar value
                                 parsed_value = dataref.parse_raw_value(value)
                                 cascade = dataref.name in self.simulator_variable_to_monitor.keys()
@@ -2185,7 +2134,6 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
                 self.all_datarefs.save("datarefs.json")
             if self.all_commands is not None:
                 self.all_commands.save("commands.json")
-            self.cleanup()
             self.ws_event.set()
             if self.ws_thread is not None and self.ws_thread.is_alive():
                 logger.debug("stopping websocket listener..")
@@ -2216,11 +2164,16 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
     def terminate(self):
         logger.debug(f"currently {'not ' if self.ws_event is None else ''}running. terminating..")
         logger.info("terminating..")
-        logger.info("..stopping websocket listener..")
-        self.stop()
-        logger.info("..deleting datarefs..")
+        # sends instructions to stop sending values/events
+        logger.info("..requests to stop sending values or events..")
         self.remove_all_simulator_variables_to_monitor()
         self.remove_all_simulator_events_to_monitor()
+        # stop receiving events from similator (websocket)
+        logger.info("..stopping websocket listener..")
+        self.stop()
+        # cleanup/reset monitored variables or events
+        logger.info("..deleting datarefs..")
+        self.cleanup()
         logger.info("..disconnecting from simulator..")
         self.disconnect()
         logger.info("..terminated")
