@@ -9,9 +9,11 @@ import threading
 import logging
 import json
 import base64
+import traceback
+
 from abc import ABC, abstractmethod
 from enum import Enum
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 import requests
 
@@ -955,8 +957,9 @@ class XPlaneREST:
 
         self._capabilities = {}
         self._beacon = XPlaneBeacon()
+        self.dynamic_timeout = RECONNECT_TIMEOUT
         self._beacon.set_callback(self.beacon_callback)
-        self._running_time = Dataref(path=RUNNING_TIME, simulator=self)  # cheating, side effect, works for rest api
+        self._running_time = Dataref(path=RUNNING_TIME, simulator=self)  # cheating, side effect, works for rest api only, do not force!
 
         self.all_datarefs: Cache | None = None
         self.all_commands: Cache | None = None
@@ -1005,6 +1008,7 @@ class XPlaneREST:
         if connected:
             logger.info("X-Plane beacon connected")
             if self._beacon.connected:
+                self.dynamic_timeout = 0.5  # seconds
                 same_host = self._beacon.same_host()
                 if same_host:
                     self.host = "127.0.0.1"
@@ -1227,6 +1231,7 @@ class XPlaneWebSocket(XPlaneREST, ABC):
                         self.set_internal_variable(name=COCKPITDECKS_INTVAR.INTDREF_CONNECTION_STATUS.value, value=2, cascade=True)
                         self._already_warned = 0
                         number_of_timeouts = 0
+                        self.dynamic_timeout = RECONNECT_TIMEOUT
                         logger.info(f"capabilities: {self.capabilities()}")
                         if self.xp_version is not None:
                             curr = Version(self.xp_version)
@@ -1264,7 +1269,8 @@ class XPlaneWebSocket(XPlaneREST, ABC):
                 # If still no connection (above attempt failed)
                 # we wait before trying again
                 if not self.connected:
-                    self.should_not_connect.wait(RECONNECT_TIMEOUT)
+                    self.dynamic_timeout = 1
+                    self.should_not_connect.wait(self.dynamic_timeout)
                     logger.debug("..no connection. trying to connect..")
             else:
                 # Connection is OK, we wait before checking again
