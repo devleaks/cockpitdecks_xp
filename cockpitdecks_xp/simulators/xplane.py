@@ -53,7 +53,7 @@ if WEBAPILOGFILE is not None:
 # Data too delicate to be put in constant.py
 # !! adjust with care !!
 # UDP sends at most ~40 to ~50 dataref values per packet.
-RECONNECT_TIMEOUT = 10  # seconds, times between attempts to reconnect to X-Plane when not connected
+RECONNECT_TIMEOUT = 10  # seconds, times between attempts to reconnect to X-Plane when not connected (except on initial startup, see dynamic_timeout)
 RECEIVE_TIMEOUT = 5  # seconds, assumes no awser if no message recevied withing that timeout
 
 XP_MIN_VERSION = 121400
@@ -61,8 +61,8 @@ XP_MIN_VERSION_STR = "12.1.4"
 XP_MAX_VERSION = 121499
 XP_MAX_VERSION_STR = "12.1.4"
 
-# /api/capabiltiies introduced in /api/v2. Here is a default one for v1.
-DEFAULT_CAPABILITIES = {"api": {"versions": ["v1"]}, "x-plane": {"version": "12.1.1"}}
+# /api/capabilities introduced in /api/v2. Here is a default one for v1.
+V1_CAPABILITIES = {"api": {"versions": ["v1"]}, "x-plane": {"version": "12.1.1"}}
 USE_REST = True  # force REST usage for remote access, otherwise websockets is privileged
 
 # #############################################
@@ -159,7 +159,7 @@ class Dataref(SimulatorVariable):
             return f"{self.path}={self.value}"
 
     @property
-    def meta(self):
+    def meta(self) -> DatarefMeta | None:
         r = self.simulator.all_datarefs.get(self.path) if self.simulator.all_datarefs is not None else None
         if r is None:
             logger.error(f"dataref {self.path} hos no api meta data")
@@ -170,21 +170,21 @@ class Dataref(SimulatorVariable):
         return self.meta is not None
 
     @property
-    def ident(self):
+    def ident(self) -> int | None:
         if not self.valid:
             logger.error(f"dataref {self.path} not valid")
             return None
         return self.meta.ident
 
     @property
-    def value_type(self):
+    def value_type(self) -> str | None:
         if not self.valid:
             logger.error(f"dataref {self.path} not valid")
             return None
         return self.meta.value_type
 
     @property
-    def is_writable(self) -> bool | None:
+    def is_writable(self) -> bool:
         if not self.valid:
             logger.error(f"dataref {self.path} not valid")
             return False
@@ -381,7 +381,7 @@ NOT_A_COMMAND = [
 
 # An instruction in X-Plane Simulator
 #
-class XPlaneInstruction(SimulatorInstruction):
+class XPlaneInstruction(SimulatorInstruction, ABC):
     """An Instruction sent to the XPlane Simulator to execute some action.
 
     This is more an abstract base class, with a new() factory to handle instruction block.
@@ -391,7 +391,7 @@ class XPlaneInstruction(SimulatorInstruction):
         SimulatorInstruction.__init__(self, name=name, simulator=simulator, delay=delay, condition=condition)
 
     @property
-    def meta(self):
+    def meta(self) -> CommandMeta | None:
         r = self.simulator.all_commands.get(self.path) if self.simulator.all_commands is not None else None
         if r is None:
             logger.error(f"dataref {self.path} hos no api meta data")
@@ -402,14 +402,14 @@ class XPlaneInstruction(SimulatorInstruction):
         return self.meta is not None
 
     @property
-    def ident(self):
+    def ident(self) -> int | None:
         if not self.valid:
             logger.error(f"dataref {self.path} not valid")
             return None
         return self.meta.ident
 
     @property
-    def description(self) -> bool | None:
+    def description(self) -> str | None:
         if not self.valid:
             return None
         return self.meta.description
@@ -586,9 +586,11 @@ class XPlaneInstruction(SimulatorInstruction):
         logger.warning(f"could not find instruction in {instruction_block}")
         return None
 
+    @abstractmethod
     def rest_execute(self) -> bool:  # ABC
         return False
 
+    @abstractmethod
     def ws_execute(self) -> int:  # ABC
         return -1
 
@@ -805,6 +807,8 @@ class CommandActiveEvent(SimulatorEvent):
         return super().info() | {"path": self.name, "cascade": self.cascade}
 
     def run(self, just_do_it: bool = False) -> bool:
+        # derifed classes may perform more sophisticated actions
+        # to chain one or more action, use observables based on simulator events.
         if just_do_it:
             logger.info(f"event {self.name} occured in simulator with active={self.is_active}")
         else:
@@ -1050,7 +1054,7 @@ class XPlaneREST:
             logger.info(f"capabilities at {self.api_url + '/capabilities'}: response={response.status_code}")
             response = requests.get(self.api_url + "/v1/datarefs/count")
             if response.status_code == 200:  # OK, /api/v1 exists, we use it, we have version 12.1.1 or above
-                self._capabilities = DEFAULT_CAPABILITIES
+                self._capabilities = V1_CAPABILITIES
                 logger.debug(f"capabilities: {self._capabilities}")
                 return self._capabilities
             logger.error(f"capabilities at {self.api_url + '/datarefs/count'}: response={response.status_code}")
