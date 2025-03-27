@@ -33,7 +33,7 @@ from cockpitdecks.observable import Observables
 from .beacon import XPlaneBeacon, BEACON_DATA_KW
 
 logger = logging.getLogger(__name__)
-logger.setLevel(SPAM_LEVEL)  # To see which dataref are requested
+# logger.setLevel(SPAM_LEVEL)  # To see which dataref are requested
 # logger.setLevel(logging.DEBUG)
 
 WEBAPILOGFILE = "webapi.log"
@@ -162,7 +162,7 @@ class Dataref(SimulatorVariable):
     def meta(self) -> DatarefMeta | None:
         r = self.simulator.all_datarefs.get(self.path) if self.simulator.all_datarefs is not None else None
         if r is None:
-            logger.error(f"dataref {self.path} hos no api meta data")
+            logger.error(f"dataref {self.path} has no api meta data")
         return r
 
     @property
@@ -286,25 +286,32 @@ class Dataref(SimulatorVariable):
     def parse_raw_value(self, raw_value):
         if not self.valid:
             logger.error(f"dataref {self.path} not valid")
-            return False
+            return None
 
         if self.value_type in [DATAREF_DATATYPE.INTARRAY.value, DATAREF_DATATYPE.FLOATARRAY.value]:
             # 1. Arrays
             # 1.1 Whole array
+            if type(raw_value) is not list:
+                logger.warning(f"dataref array {self.name}: value: is not a list ({value}, {type(value)})")
+                return None
+
             if len(self.meta.indices) == 0:
+                logger.debug(f"dataref array {self.name}: no index, returning whole array")
                 return raw_value
 
             # 1.2 Single array element
             if len(raw_value) != len(self.meta.indices):
                 logger.warning(f"dataref array {self.name} size mismatch ({len(raw_value)}/{len(self.meta.indices)})")
                 logger.warning(f"dataref array {self.name}: value: {raw_value}, indices: {self.meta.indices})")
-            if self._index_in_value_array is None:
-                logger.warning(f"dataref array {self.name}: no returned value index")
-                return raw_value
-            if self._index_in_value_array >= len(raw_value):
-                logger.warning(f"dataref array {self.name}: returned value index {self._index_in_value_array} out of range ({len(raw_value)})")
-                return raw_value
-            return raw_value[self._index_in_value_array]
+                return None
+
+            idx = self.meta.indices.index(self.index)
+            if idx == -1:
+                logger.warning(f"dataref index {self.index} not found in {self.meta.indices}")
+                return None
+
+            logger.debug(f"dataref array {self.name}: returning {self.name}[{idx}]={raw_value[idx]}")
+            return raw_value[idx]
 
         else:
             # 2. Scalar values
@@ -852,7 +859,12 @@ class DatarefMeta:
             self.indices.append(i)
 
     def remove_index(self, i):
-        self.indices.remove(i)
+        # there is a problem if we remove a key here, and then still get
+        # an array of values that contains the removed index
+        if i in self.indices:
+            self.indices.remove(i)
+        else:
+            logger.warning(f"{self.name} index {i} not in {self.indices}")
 
 
 class CommandMeta:
@@ -968,21 +980,28 @@ class XPlaneREST:
         self.all_datarefs: Cache | None = None
         self.all_commands: Cache | None = None
         self._last_updated = 0
+        self._warning_count = 0
 
     @property
     # See https://stackoverflow.com/questions/7019643/overriding-properties-in-python
     # to overwrite @property definition
     def api_url(self) -> str:
-        """URL for the REST API."""
+        """URL for the REST API"""
         return f"http://{self.host}:{self.port}{self._api_root_path}{self._api_version}"
+
+    @property
+    def uptime(self) -> float:
+        if self._running_time is not None:
+            r = self._running_time.rest_value
+            if r is not None:
+                return float(r)
+        return 0.0
 
     @property
     def ws_url(self) -> str:
         """URL for the WebSocket API"""
         url = self.api_url
-        if url is not None:
-            return url.replace("http:", "ws:")
-        return None
+        return url.replace("http:", "ws:")
 
     @property
     def api_is_available(self) -> bool:
@@ -1003,7 +1022,9 @@ class XPlaneREST:
             if response.status_code == 200:
                 return True
         except requests.exceptions.ConnectionError:
-            logger.warning(f"api unreachable, may be X-Plane is not running")
+            if self._warning_count % 20 == 0:
+                logger.warning(f"api unreachable, may be X-Plane is not running")
+                self._warning_count = self._warning_count + 1
         except:
             logger.error(f"api unreachable, may be X-Plane is not running", exc_info=True)
         return False
@@ -1118,7 +1139,7 @@ class XPlaneREST:
             self._last_updated = self._running_time.rest_value
         else:
             logger.warning("no value for sim/time/total_running_time_sec")
-        logger.info(f"dataref cache ({self.all_datarefs.count}) and command cache ({self.all_commands.count}) reloaded ({round(self._last_updated, 1)})")
+        logger.info(f"dataref cache ({self.all_datarefs.count}) and command cache ({self.all_commands.count}) reloaded, sim uptime {str(timedelta(seconds=int(self.uptime)))}")
 
     def get_dataref_meta_by_name(self, path: str) -> DatarefMeta | None:
         return self.all_datarefs.get_by_name(path) if self.all_datarefs is not None else None
@@ -1151,6 +1172,7 @@ class XPlaneWebSocket(XPlaneREST, ABC):
         self.local_ip = socket.gethostbyname(hostname)
 
         self.ws = None  # None = no connection
+        self.ws_event = None
         self.req_number = 0
         self._requests = {}
 
@@ -1224,12 +1246,15 @@ class XPlaneWebSocket(XPlaneREST, ABC):
         MAX_TIMEOUT_COUNT = 5
         WARN_FREQ = 10
         number_of_timeouts = 0
-        cnt = 0
+        to_count = 0
+        noconn = 0
         self.set_internal_variable(name=COCKPITDECKS_INTVAR.INTDREF_CONNECTION_STATUS.value, value=1, cascade=True)
         while self.should_not_connect is not None and not self.should_not_connect.is_set():
             if not self.connected:
                 try:
-                    logger.info("not connected, trying..")
+                    if noconn % WARN_FREQ == 0:
+                        logger.info("not connected, trying..")
+                        noconn = noconn + 1
                     self.connect_websocket()
                     if self.connected:
                         self.set_internal_variable(name=COCKPITDECKS_INTVAR.INTDREF_CONNECTION_STATUS.value, value=2, cascade=True)
@@ -1248,7 +1273,7 @@ class XPlaneWebSocket(XPlaneREST, ABC):
                                 logger.warning(f"X-Plane version {curr} detected, maximal version is {xpmax}")
                                 logger.warning("Some features in Cockpitdecks may not work properly")
                             else:
-                                logger.info(f"X-Plane version ok ({xpmin}<= {curr} <={xpmax})")
+                                logger.info(f"X-Plane version requirements {xpmin}<= {curr} <={xpmax} satisfied")
                         logger.debug("..connected, starting websocket listener..")
                         self.start()
                         # self.inc(COCKPITDECKS_INTVAR.STARTS.value)
@@ -1265,9 +1290,9 @@ class XPlaneWebSocket(XPlaneREST, ABC):
                                 self.set_internal_variable(name=COCKPITDECKS_INTVAR.INTDREF_CONNECTION_STATUS.value, value=1, cascade=True)
                                 # self.inc(COCKPITDECKS_INTVAR.STOPS.value)
 
-                        if number_of_timeouts >= MAX_TIMEOUT_COUNT and cnt % WARN_FREQ == 0:
+                        if number_of_timeouts >= MAX_TIMEOUT_COUNT and to_count % WARN_FREQ == 0:
                             logger.error(f"..X-Plane instance not found on local network.. ({datetime.now().strftime('%H:%M:%S')})")
-                        cnt = cnt + 1
+                        to_count = to_count + 1
                 except:
                     logger.error(f"..X-Plane instance not found on local network.. ({datetime.now().strftime('%H:%M:%S')})", exc_info=True)
                 # If still no connection (above attempt failed)
@@ -1381,23 +1406,34 @@ class XPlaneWebSocket(XPlaneREST, ABC):
     def register_bulk_dataref_value_event(self, datarefs, on: bool = True) -> bool:
         drefs = []
         for dataref in datarefs.values():
-            if dataref.is_array and dataref.index is not None:
-                drefs.append({REST_KW.IDENT.value: dataref.ident, REST_KW.INDEX.value: dataref.index})
-                desc1 = self.get_dataref_meta_by_id(dataref.ident)  # we modify the global source info, not the local copy in the Dataref()
-                if on:
-                    desc1.append_index(dataref.index)
-                else:
-                    desc1.remove_index(dataref.index)
+            if type(dataref) is list:
+                meta = self.get_dataref_meta_by_id(dataref[0].ident)  # we modify the global source info, not the local copy in the Dataref()
+                ilist = []
+                for d1 in dataref:
+                    ilist.append(d1.index)
+                    if on:
+                        meta.append_index(d1.index)
+                    else:
+                        meta.remove_index(d1.index)
+                drefs.append({REST_KW.IDENT.value: dataref[0].ident, REST_KW.INDEX.value: ilist})
             else:
                 if dataref.is_array:
                     logger.debug(f"dataref {dataref.name}: collecting whole array")
                 drefs.append({REST_KW.IDENT.value: dataref.ident})
         if len(datarefs) > 0:
+            mapping = {}
+            for d in datarefs.values():
+                if type(d) is list:
+                    for d1 in d:
+                        mapping[d1.ident] = d1.name
+                else:
+                    mapping[d.ident] = d.name
             action = "dataref_subscribe_values" if on else "dataref_unsubscribe_values"
-            err = self.send({REST_KW.TYPE.value: action, REST_KW.PARAMS.value: {REST_KW.DATAREFS.value: drefs}}, {k: v.name for k, v in datarefs.items()})
+            err = self.send({REST_KW.TYPE.value: action, REST_KW.PARAMS.value: {REST_KW.DATAREFS.value: drefs}}, mapping)
             return err != -1
-        action = "register" if on else "unregister"
-        logger.warning(f"no bulk datarefs to {action}")
+        if on:
+            action = "register" if on else "unregister"
+            logger.warning(f"no bulk datarefs to {action}")
         return False
 
     # Command operations
@@ -1425,8 +1461,9 @@ class XPlaneWebSocket(XPlaneREST, ABC):
         if len(cmds) > 0:
             action = "command_subscribe_is_active" if on else "command_unsubscribe_is_active"
             return self.send({REST_KW.TYPE.value: action, REST_KW.PARAMS.value: {REST_KW.COMMANDS.value: cmds}}, mapping)
-        action = "register" if on else "unregister"
-        logger.warning(f"no bulk command active to {action}")
+        if on:
+            action = "register" if on else "unregister"
+            logger.warning(f"no bulk command active to {action}")
         return -1
 
     def set_command_is_active_with_duration(self, path: str, duration: float = 0.0) -> int:
@@ -1494,7 +1531,6 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         self.cmdevents = set()  # list of command active events currently monitored
         self._max_events_monitored = 0
 
-        self.ws_event = threading.Event()
         self.ws_thread = None
         self._permanent_observables = []  # cannot create them now since XPlane does not exist yet
         self._observables = None  # local config observables for this simulator
@@ -1509,6 +1545,9 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         XPlaneWebSocket.__init__(self, host=self.api_host[0], port=self.api_host[1], api=self.api_path, api_version=self.api_version)
         SimulatorVariableListener.__init__(self, name=self.name)
         self.cockpit.set_logging_level(__name__)
+
+        self.ws_event = threading.Event()
+        self.ws_event.set()  # means it is off
 
         self.init()
 
@@ -1570,6 +1609,12 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
             return simnow
         return now
 
+    def rebuild_dataref_ids(self):
+        if self.all_datarefs.has_data and len(self._dataref_by_id) > 0:
+            self._dataref_by_id = {d.ident: d for d in self._dataref_by_id}
+            logger.info("dataref ids rebuilt")
+            return
+        logger.warning("no data to rebuild dataref ids")
     # ################################
     # Observables
     #
@@ -1740,23 +1785,34 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
             logger.debug("no variable to add")
             return
         # Add those to monitor
-        super().add_simulator_variables_to_monitor(simulator_variables=simulator_variables)
         datarefs = {}
         for d in simulator_variables.values():
             if d.is_internal:
                 logger.debug(f"local dataref {d.name} is not monitored")
                 continue
-            ident = d.ident
-            if ident is not None:
-                datarefs[d.ident] = d
-                d.monitor()  # increases counter
-            else:
-                logger.warning(f"{d.name} identifier not found")
+            if not d.is_monitored:
+                ident = d.ident
+                if ident is not None:
+                    if d.is_array and d.index is not None:
+                        if ident not in datarefs:
+                            datarefs[ident] = []
+                        datarefs[ident].append(d)
+                    else:
+                        datarefs[ident] = d
+            d.monitor()
+        super().add_simulator_variables_to_monitor(simulator_variables=simulator_variables)
 
         if len(datarefs) > 0:
             self.register_bulk_dataref_value_event(datarefs=datarefs, on=True)
             self._dataref_by_id = self._dataref_by_id | datarefs
-            logger.log(SPAM_LEVEL, f">>>>> add_simulator_variable_to_monitor: {reason}: added {[d.path for d in datarefs.values()]}")
+            dlist = []
+            for d in datarefs.values():
+                if type(d) is list:
+                    for d1 in d:
+                        dlist.append(d1.name)
+                else:
+                    dlist.append(d.name)
+            logger.log(SPAM_LEVEL, f">>>>> add_simulator_variable_to_monitor: {reason}: added {dlist}")
             self._max_datarefs_monitored = max(self._max_datarefs_monitored, len(self._dataref_by_id))
         else:
             logger.debug("no variable to add")
@@ -1779,19 +1835,37 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
             if d.is_internal:
                 logger.debug(f"internal variable {d.name} is not monitored")
                 continue
-            if d.name in self.simulator_variable_to_monitor.keys():
+            if d.is_monitored:
                 if not d.unmonitor():  # will be decreased by 1 in super().remove_simulator_variable_to_monitor()
-                    datarefs[d.ident] = d
+                    ident = d.ident
+                    if ident is not None:
+                        if d.is_array and d.index is not None:
+                            if ident not in datarefs:
+                                datarefs[ident] = []
+                            datarefs[ident].append(d)
+                        else:
+                            datarefs[ident] = d
                 else:
-                    logger.debug(f"{d.name} monitored {d.monitored_count} times")
+                    logger.debug(f"{d.name} monitored {d.monitored_count} times, not removed")
             else:
-                logger.debug(f"no need to remove {d.name}")
+                logger.debug(f"no need to remove {d.name}, not monitored")
+        super().remove_simulator_variables_to_monitor(simulator_variables=simulator_variables)
 
         if len(datarefs) > 0:
             self.register_bulk_dataref_value_event(datarefs=datarefs, on=False)
             for i in datarefs.keys():
-                del self._dataref_by_id[i]
-            logger.log(SPAM_LEVEL, f">>>>> remove_simulator_variables_to_monitor: {reason}: removed {[d.path for d in datarefs.values()]}")
+                if i in self._dataref_by_id:
+                    del self._dataref_by_id[i]
+                else:
+                    logger.warning(f"no dataref for id={self.all_datarefs.equiv(ident=i)}")
+            dlist = []
+            for d in datarefs.values():
+                if type(d) is list:
+                    for d1 in d:
+                        dlist.append(d1.name)
+                else:
+                    dlist.append(d.name)
+            logger.log(SPAM_LEVEL, f">>>>> remove_simulator_variables_to_monitor: {reason}: removed {dlist}")
         else:
             logger.debug("no variable to remove")
         self.print_currently_monitored_variables()
@@ -1799,15 +1873,6 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
             logger.info(
                 f">>>>> monitoring variables--{len(simulator_variables)}({len(datarefs)})/{len(self._dataref_by_id)}/{self._max_datarefs_monitored} {reason if reason is not None else ''}"
             )
-
-    def remove_all_simulator_variables_to_monitor(self):
-        datarefs = [d for d in self.cockpit.variable_database.database.values() if type(d) is Dataref]
-        if not self.connected and len(datarefs) > 0:
-            logger.debug(f"would remove {', '.join([d.name for d in datarefs])}")
-            return
-        # This is not necessary:
-        # self.remove_simulator_variable_to_monitor(datarefs)
-        super().remove_all_simulator_variable()
 
     def add_all_simulator_variables_to_monitor(self):
         if not self.connected:
@@ -1834,6 +1899,15 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
             logger.log(SPAM_LEVEL, f">>>>> add_all_simulator_variables_to_monitor: added {[d.path for d in datarefs.values()]}")
         else:
             logger.debug("no simulator variable to monitor")
+
+    def remove_all_simulator_variables_to_monitor(self):
+        datarefs = [d for d in self.cockpit.variable_database.database.values() if type(d) is Dataref]
+        if not self.connected and len(datarefs) > 0:
+            logger.debug(f"would remove {', '.join([d.name for d in datarefs])}")
+            return
+        # This is not necessary:
+        # self.remove_simulator_variable_to_monitor(datarefs)
+        super().remove_all_simulator_variable()
 
     #
     # Event management
@@ -1965,8 +2039,9 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         RECEIVE_TIMEOUT = 1  # when not connected, checks often
         total_reads = 0
         print_zulu = 0
-        cnt = 0
-        cnt_mod = 10
+        to_count = 0
+        TO_COUNT_SPAM = 10
+        TO_COUNT_INFO = 50
         start_time = datetime.now()
         last_read_ts = start_time
         total_read_time = 0.0
@@ -1975,8 +2050,10 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
             try:
                 message = self.ws.receive(timeout=RECEIVE_TIMEOUT)
                 if message is None:
-                    cnt = cnt + 1
-                    if cnt % cnt_mod == 0:
+                    to_count = to_count + 1
+                    if to_count % TO_COUNT_INFO == 0:
+                        logger.info("waiting for data from simulator..")  # at {datetime.now()}")
+                    elif to_count % TO_COUNT_SPAM == 0:
                         logger.log(SPAM_LEVEL, "waiting for data from simulator..")  # at {datetime.now()}")
                     continue
 
@@ -2047,49 +2124,44 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
                             continue
 
                         for ident, value in data[REST_KW.DATA.value].items():
-                            dataref = self._dataref_by_id.get(int(ident))
+                            ident = int(ident)
+                            dataref = self._dataref_by_id.get(ident)
                             if dataref is None:
-                                logger.warning(f"no dataref for id={self.all_datarefs.equiv(ident=int(ident))}")
+                                logger.debug(f"no dataref for id={self.all_datarefs.equiv(ident=int(ident))} (this may be a previously requested dataref arriving late..., safely ignore)")
                                 continue
 
-                            if dataref.is_array:
-                                # There are two possible cases for array datarefs:
-                                # 1. We requested the whole array of value: AirbuFBW/HUDBrightnessRheo
-                                # 2. We requested one or more values from the array: AirbuFBW/HUDBrightnessRheo[0], AirbuFBW/HUDBrightnessRheo[3]
-                                # In first case we get all values back:
-                                # R1:  AirbuFBW/HUDBrightnessRheo = [1, 2, 3, 4, 5, 6, 7, 8]
-                                # R2:  AirbuFBW/HUDBrightnessRheo = [1, 4], and we have to remember in Dataref.meta.indices = [0, 3] (requested array indices)
-                                # In both case, Dataref.meta is for AirbuFBW/HUDBrightnessRheo.
-                                # 1. meta.indices = [], meaning whole array
-                                # 2. meta.indices = [0, 3], list of requested array, in order as requested
+                            if type(dataref) is list:
                                 #
-                                # 1. Arrays
-                                # 1.a Whole array
-                                if len(dataref.meta.indices) == 0:
-                                    cascade = dataref.name in self.simulator_variable_to_monitor.keys()
-                                    webapi_logger.info(f"DREF WHOLE ARRAY: {dataref.name} = {value} (cascade={cascade})")  # webapi_logger.info
-                                    e = DatarefEvent(sim=self, dataref=dataref.name, value=value, cascade=cascade)  # send raw value if possible
-                                    self.inc(COCKPITDECKS_INTVAR.UPDATE_ENQUEUED.value)
+                                # 1. One or more values from a dataref array (but not all values)
+                                if type(value) is not list:
+                                    logger.warning(f"dataref array {self.all_datarefs.equiv(ident=ident)} value is not a list ({value}, {type(value)})")
                                     continue
-                                #
-                                # 1.b Single array element
-                                # First check for consistency
-                                if len(value) != len(dataref.meta.indices):
-                                    logger.warning(f"dataref array {dataref.name} size mismatch ({len(value)}/{len(dataref.meta.indices)})")
-                                    logger.warning(f"dataref array {dataref.name}: value: {value}, indices: {dataref.meta.indices})")
+                                meta = dataref[0].meta
+                                if meta is None:
+                                    logger.warning(f"dataref array {self.all_datarefs.equiv(ident=ident)} meta data not found")
                                     continue
-                                # Second, we have to update each element in the array
-                                for idx, v1 in zip(dataref.meta.indices, value):
-                                    d1 = f"{dataref.name}[{idx}]"
-                                    cascade = d1 in self.simulator_variable_to_monitor.keys()
+                                if len(value) != len(meta.indices):
+                                    logger.warning(f"dataref array {self.all_datarefs.equiv(ident=ident)}: size mismatch ({len(value)}/{len(meta.indices)})")
+                                    logger.warning(f"dataref array {self.all_datarefs.equiv(ident=ident)}: value: {value}, indices: {meta.indices})")
+                                    continue
+                                for idx, v1 in zip(meta.indices, value):
+                                    d1 = f"{meta.name}[{idx}]"
+                                    cascade = d1 in self.simulator_variable_to_monitor
                                     webapi_logger.info(f"DREF ARRAY: {d1} = {v1} (cascade={cascade})")
                                     e = DatarefEvent(sim=self, dataref=d1, value=v1, cascade=cascade)
                                     self.inc(COCKPITDECKS_INTVAR.UPDATE_ENQUEUED.value)
+                                # alternative:
+                                # for d in dataref:
+                                #     parsed_value = d.parse_raw_value(value)
+                                #     cascade = d.name in self.simulator_variable_to_monitor
+                                #     webapi_logger.info(f"DREF: {d.name} = {parsed_value} (cascade={cascade})")  # webapi_logger.info
+                                #     e = DatarefEvent(sim=self, dataref=d.name, value=parsed_value, cascade=cascade)  # send raw value if possible
+                                #     self.inc(COCKPITDECKS_INTVAR.UPDATE_ENQUEUED.value)
                             else:
                                 #
                                 # 2. Scalar value
                                 parsed_value = dataref.parse_raw_value(value)
-                                cascade = dataref.name in self.simulator_variable_to_monitor.keys()
+                                cascade = dataref.name in self.simulator_variable_to_monitor
                                 webapi_logger.info(f"DREF: {dataref.name} = {parsed_value} (cascade={cascade})")  # webapi_logger.info
                                 e = DatarefEvent(sim=self, dataref=dataref.name, value=parsed_value, cascade=cascade)  # send raw value if possible
                                 self.inc(COCKPITDECKS_INTVAR.UPDATE_ENQUEUED.value)
@@ -2121,7 +2193,8 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
             logger.warning("not connected. cannot not start.")
             return
 
-        if not self.ws_event.is_set():  # Thread for X-Plane datarefs
+        if self.ws_event.is_set():  # Thread for X-Plane datarefs
+            self.ws_event.clear()
             self.ws_thread = threading.Thread(target=self.ws_receiver, name="XPlane::WebSocket Listener")
             self.ws_thread.start()
             logger.info("websocket listener started")
@@ -2131,6 +2204,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         # When restarted after network failure, should clean all datarefs
         # then reload datarefs from current page of each deck
         self.reload_caches()
+        self.rebuild_dataref_ids()
         self.clean_simulator_variables_to_monitor()
         self.add_all_simulator_variables_to_monitor()
         self.clean_simulator_events_to_monitor()
