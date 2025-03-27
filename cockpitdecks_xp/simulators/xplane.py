@@ -1139,7 +1139,9 @@ class XPlaneREST:
             self._last_updated = self._running_time.rest_value
         else:
             logger.warning("no value for sim/time/total_running_time_sec")
-        logger.info(f"dataref cache ({self.all_datarefs.count}) and command cache ({self.all_commands.count}) reloaded, sim uptime {str(timedelta(seconds=int(self.uptime)))}")
+        logger.info(
+            f"dataref cache ({self.all_datarefs.count}) and command cache ({self.all_commands.count}) reloaded, sim uptime {str(timedelta(seconds=int(self.uptime)))}"
+        )
 
     def get_dataref_meta_by_name(self, path: str) -> DatarefMeta | None:
         return self.all_datarefs.get_by_name(path) if self.all_datarefs is not None else None
@@ -1615,6 +1617,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
             logger.info("dataref ids rebuilt")
             return
         logger.warning("no data to rebuild dataref ids")
+
     # ################################
     # Observables
     #
@@ -2127,7 +2130,9 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
                             ident = int(ident)
                             dataref = self._dataref_by_id.get(ident)
                             if dataref is None:
-                                logger.debug(f"no dataref for id={self.all_datarefs.equiv(ident=int(ident))} (this may be a previously requested dataref arriving late..., safely ignore)")
+                                logger.debug(
+                                    f"no dataref for id={self.all_datarefs.equiv(ident=int(ident))} (this may be a previously requested dataref arriving late..., safely ignore)"
+                                )
                                 continue
 
                             if type(dataref) is list:
