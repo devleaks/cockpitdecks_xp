@@ -9,16 +9,19 @@ import threading
 import logging
 import json
 import base64
-import traceback
 
 from abc import ABC, abstractmethod
 from enum import Enum
 from datetime import datetime, timedelta
 
+# Packaging is used in Cockpit to check driver versions
+from packaging.version import Version
+
+# REST API
 import requests
 
+# WEBSOCKET API
 from simple_websocket import Client, ConnectionClosed
-from packaging.version import Version
 
 from cockpitdecks_xp import __version__
 from cockpitdecks import CONFIG_KW, ENVIRON_KW, SPAM_LEVEL, DEPRECATION_LEVEL, MONITOR_RESOURCE_USAGE, RESOURCES_FOLDER, OBSERVABLES_FILE, yaml
@@ -30,7 +33,7 @@ from cockpitdecks.simulator import SimulatorVariable, SimulatorVariableListener
 from cockpitdecks.resources.intvariables import COCKPITDECKS_INTVAR
 from cockpitdecks.observable import Observables
 
-from .beacon import XPlaneBeacon, BEACON_DATA_KW
+from ..resources.beacon import XPlaneBeacon, BEACON_DATA_KW
 
 logger = logging.getLogger(__name__)
 # logger.setLevel(SPAM_LEVEL)  # To see which dataref are requested
@@ -89,6 +92,9 @@ USEFUL_DATAREFS = []  # monitored to determine of cached data is valid  # Total 
 
 PERMANENT_SIMULATOR_VARIABLES = set(USEFUL_DATAREFS)  # set(DATETIME_DATAREFS + REPLAY_DATAREFS + USEFUL_DATAREFS)
 PERMANENT_SIMULATOR_EVENTS = {}  #
+
+# changes too often, clutters web api log.
+BLACK_LIST = [ZULU_TIME_SEC, "sim/flightmodel/position/latitude", "sim/flightmodel/position/longitude"]
 
 
 # #############################################
@@ -835,8 +841,10 @@ class DatarefMeta:
         self.value_type = value_type
         self.is_writable = is_writable
         self.indices = list()
+        self.indices_history = []
 
         self.updates = 0
+        self._last_req_number = 0
         self._previous_value = None
         self._current_value = None
 
@@ -853,6 +861,14 @@ class DatarefMeta:
     @property
     def is_array(self) -> bool:
         return self.value_type in [DATAREF_DATATYPE.INTARRAY.value, DATAREF_DATATYPE.FLOATARRAY.value]
+
+    def save_indices(self):
+        self.indices_history.append(self.indices.copy())
+
+    def last_indices(self) -> list:
+        if len(self.indices_history) > 0:
+            return self.indices_history[-1]
+        return []
 
     def append_index(self, i):
         if i not in self.indices:
@@ -1361,7 +1377,7 @@ class XPlaneWebSocket(XPlaneREST, ABC):
             if payload is not None and len(payload) > 0:
                 req_id = self.next_req
                 payload[REST_KW.REQID.value] = req_id
-                self._requests[req_id] = None
+                self._requests[req_id] = None  # may be should remember timestamp, etc. if necessary, create Request class.
                 self.ws.send(json.dumps(payload))
                 webapi_logger.info(f">>SENT {payload}")
                 if len(mapping) > 0:
@@ -1410,14 +1426,21 @@ class XPlaneWebSocket(XPlaneREST, ABC):
         for dataref in datarefs.values():
             if type(dataref) is list:
                 meta = self.get_dataref_meta_by_id(dataref[0].ident)  # we modify the global source info, not the local copy in the Dataref()
+                webapi_logger.info(f"INDICES bef: {dataref[0].ident} => {meta.indices}")
+                meta.save_indices()  # indices of "current" requests
                 ilist = []
+                otext = "on "
                 for d1 in dataref:
                     ilist.append(d1.index)
                     if on:
                         meta.append_index(d1.index)
                     else:
+                        otext = "off"
                         meta.remove_index(d1.index)
+                    meta._last_req_number = self.req_number  # not 100% correct, but sufficient
                 drefs.append({REST_KW.IDENT.value: dataref[0].ident, REST_KW.INDEX.value: ilist})
+                webapi_logger.info(f"INDICES {otext}: {dataref[0].ident} => {ilist}")
+                webapi_logger.info(f"INDICES aft: {dataref[0].ident} => {meta.indices}")
             else:
                 if dataref.is_array:
                     logger.debug(f"dataref {dataref.name}: collecting whole array")
@@ -2145,11 +2168,23 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
                                 if meta is None:
                                     logger.warning(f"dataref array {self.all_datarefs.equiv(ident=ident)} meta data not found")
                                     continue
-                                if len(value) != len(meta.indices):
-                                    logger.warning(f"dataref array {self.all_datarefs.equiv(ident=ident)}: size mismatch ({len(value)}/{len(meta.indices)})")
-                                    logger.warning(f"dataref array {self.all_datarefs.equiv(ident=ident)}: value: {value}, indices: {meta.indices})")
-                                    continue
-                                for idx, v1 in zip(meta.indices, value):
+                                current_indices = meta.indices
+                                if len(value) != len(current_indices):
+                                    logger.warning(
+                                        f"dataref array {self.all_datarefs.equiv(ident=ident)}: size mismatch ({len(value)} vs {len(current_indices)})"
+                                    )
+                                    logger.warning(f"dataref array {self.all_datarefs.equiv(ident=ident)}: value: {value}, indices: {current_indices})")
+                                    # So! since we totally missed this set of data, we ask for the set again to refresh the data:
+                                    # err = self.send({REST_KW.TYPE.value: "dataref_subscribe_values", REST_KW.PARAMS.value: {REST_KW.DATAREFS.value: meta.indices}}, {})
+                                    last_indices = meta.last_indices()
+                                    if len(value) != len(last_indices):
+                                        logger.warning(f"no attempt with previously requested indices, no match")
+                                        continue
+                                    else:
+                                        logger.warning(f"attempt with previously requested indices.. (we have a match)")
+                                        logger.warning(f"dataref array: current value: {value}, previous indices: {last_indices})")
+                                        current_indices = last_indices
+                                for idx, v1 in zip(current_indices, value):
                                     d1 = f"{meta.name}[{idx}]"
                                     cascade = d1 in self.simulator_variable_to_monitor
                                     webapi_logger.info(f"DREF ARRAY: {d1} = {v1} (cascade={cascade})")
@@ -2167,7 +2202,8 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
                                 # 2. Scalar value
                                 parsed_value = dataref.parse_raw_value(value)
                                 cascade = dataref.name in self.simulator_variable_to_monitor
-                                webapi_logger.info(f"DREF: {dataref.name} = {parsed_value} (cascade={cascade})")  # webapi_logger.info
+                                if dataref.name not in BLACK_LIST:  # changes too often, clutters web api log.
+                                    webapi_logger.info(f"DREF: {dataref.name} = {parsed_value} (cascade={cascade})")  # webapi_logger.info
                                 e = DatarefEvent(sim=self, dataref=dataref.name, value=parsed_value, cascade=cascade)  # send raw value if possible
                                 self.inc(COCKPITDECKS_INTVAR.UPDATE_ENQUEUED.value)
                     #
@@ -2214,8 +2250,9 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         self.add_all_simulator_variables_to_monitor()
         self.clean_simulator_events_to_monitor()
         self.add_all_simulator_events_to_monitor()
-        logger.info("reloading pages")
+        logger.info("request to reload pages")
         self.cockpit.reload_pages()  # to request page variables and take into account updated values
+        logger.info(f"{self.name} started")
 
     def stop(self):
         if not self.ws_event.is_set():
@@ -2254,14 +2291,14 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         logger.debug(f"currently {'not ' if self.ws_event is None else ''}running. terminating..")
         logger.info("terminating..")
         # sends instructions to stop sending values/events
-        logger.info("..requests to stop sending values or events..")
+        logger.info("..request to stop sending value updates and events..")
         self.remove_all_simulator_variables_to_monitor()
         self.remove_all_simulator_events_to_monitor()
         # stop receiving events from similator (websocket)
         logger.info("..stopping websocket listener..")
         self.stop()
         # cleanup/reset monitored variables or events
-        logger.info("..deleting datarefs..")
+        logger.info("..deleting references to datarefs..")
         self.cleanup()
         logger.info("..disconnecting from simulator..")
         self.disconnect()

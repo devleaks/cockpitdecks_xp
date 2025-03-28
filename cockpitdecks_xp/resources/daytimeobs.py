@@ -78,6 +78,9 @@ class DaytimeObservable(Observable):
         dt = datetime(datetime.now().year, 1, 1, tzinfo=timezone.utc) + timedelta(days=days) + timedelta(seconds=secs)
         sr = sun.get_sunrise_time(dt)
         ss = sun.get_sunset_time(dt)
+        # https://github.com/SatAgro/suntime/issues/30
+        if sr.day != ss.day:
+            ss = ss + timedelta(days=1)
         daytime = 1 if sr <= dt <= ss else 0
         logger.debug(f"at {dt}, sunrise={sr}, sunset={ss}, daytime={daytime} (nb: all times in UTC)")
 

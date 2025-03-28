@@ -1,3 +1,5 @@
+# Demonstration conceptual "Permanent" observable.
+# This one registers a simulator event (map activation)
 #
 import logging
 

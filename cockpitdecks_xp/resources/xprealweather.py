@@ -16,6 +16,7 @@ import requests
 # from tabulate import tabulate
 from avwx import Station, Metar
 
+from cockpitdecks import nowutc
 from cockpitdecks.resources.weather import WeatherData
 from cockpitdecks.resources.geo import distance
 
@@ -28,10 +29,6 @@ class WEATHER_LOCATION(Enum):
     #
     AIRCRAFT = "aircraft"
     REGION = "region"
-
-
-def nowutc() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 class XPRealWeatherData(WeatherData):
@@ -228,6 +225,29 @@ class XPRealWeatherData(WeatherData):
     def collect_weather_datarefs(self, position_only: bool = False) -> dict:
         DATA = "data"
         IDENT = "id"
+        NAME = "name"
+
+        def get_all_dataref_specs(datarefs: list) -> dict | None:
+            payload = "&".join([f"filter[name]={path}" for path in datarefs])
+            response = requests.get(self.api_url, params=payload)
+            resp = response.json()
+            if DATA in resp:
+                return {d[NAME]: d for d in resp[DATA]}
+            logger.error(resp)
+            return None
+
+        def get_dataref_value_alt(path: str, DATAREF_SPECS) -> dict | None:
+            dref = DATAREF_SPECS.get(path)
+            if dref is None or IDENT not in dref:
+                logger.error(f"error for {path}")
+                return None
+            url = f"{self.api_url}/{dref[IDENT]}/value"
+            response = requests.get(url)
+            data = response.json()
+            if DATA in data:
+                return data[DATA]
+            logger.error(f"no value for {path}")
+            return None
 
         def get_dataref_specs(path: str) -> dict | None:
             api_url = self.api_url
@@ -269,10 +289,11 @@ class XPRealWeatherData(WeatherData):
             logger.info(f"collecting {self.xp_real_weather_type} weather datarefs..")
         weather_datarefs = {}
         debug = True
+        DATAREF_SPECS = get_all_dataref_specs(datarefs=WEATHER_DATAFEFS.values())
         if debug:
             print("collecting ", end="", flush=True)
         for d in WEATHER_DATAFEFS.values():
-            v = get_dataref_value(d)
+            v = get_dataref_value_alt(d, DATAREF_SPECS)
             weather_datarefs[d] = v
             # logger.debug(f"{d}={v}")
             if debug:
