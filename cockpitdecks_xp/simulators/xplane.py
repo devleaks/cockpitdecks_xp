@@ -873,6 +873,19 @@ class DatarefMeta:
     def append_index(self, i):
         if i not in self.indices:
             self.indices.append(i)
+            """Note from Web API instruction/manual:
+            If you subscribed to certain indexes of the dataref, they’ll be sent in the index order
+            but no sparse arrays will be sent. For example if you subscribed to indexes [1, 5, 7] you’ll get
+            a 3 item array like [200, 200, 200], meaning you need to remember that the first item of that response
+            corresponds to index 1, the second to index 5 and the third to index 7 of the dataref.
+            This also means that if you subscribe to index 2 and later to index 0 you’ll get them as [0,2].
+
+            HENCE current_indices.sort()
+
+            So bottom line is — keep it simple: either ask for a single index, or a range,
+            or all; and if later your requirements change, unsubscribe, then subscribe again.
+            """
+            # self.indices.sort()
 
     def remove_index(self, i):
         # there is a problem if we remove a key here, and then still get
@@ -1558,7 +1571,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
 
         self.ws_thread = None
         self._permanent_observables = []  # cannot create them now since XPlane does not exist yet
-        self._observables = None  # local config observables for this simulator
+        self._observables: Observables | None = None  # local config observables for this simulator
 
         self.xp_home = environ.get(ENVIRON_KW.SIMULATOR_HOME.value)
         self.api_host = environ.get(ENVIRON_KW.API_HOST.value, "127.0.0.1")
@@ -1646,10 +1659,14 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
     #
     @property
     def observables(self) -> list:
+        # This is the collection of "permanent" observables (coded)
+        # and simulator observables (in <simulator base>/resources/observables.yaml)
         ret = self._permanent_observables
         if self._observables is not None:
             if hasattr(self._observables, "observables"):
                 ret = ret + self._observables.observables
+            elif type(self._observables) is dict:
+                ret = ret + list(self._observables.values())
             elif type(self._observables) is list:
                 ret = ret + self._observables
             else:
@@ -1657,7 +1674,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         return ret
 
     def load_observables(self):
-        if self._observables is not None:
+        if self._observables is not None:  # load once
             return
         fn = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", RESOURCES_FOLDER, OBSERVABLES_FILE))
         if os.path.exists(fn):
@@ -1665,9 +1682,9 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
             with open(fn, "r") as fp:
                 config = yaml.load(fp)
             self._observables = Observables(config=config, simulator=self)
-            logger.info(f"loaded {len(self._observables.observables)} simulator observables")
+            logger.info(f"loaded {len(self._observables.observables)} {self.name} simulator observables")
         else:
-            logger.info("no simulator observables")
+            logger.info(f"no {self.name} simulator observables")
 
     def create_permanent_observables(self):
         # Permanent observables are "coded" observables
@@ -2178,12 +2195,13 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
                                     # err = self.send({REST_KW.TYPE.value: "dataref_subscribe_values", REST_KW.PARAMS.value: {REST_KW.DATAREFS.value: meta.indices}}, {})
                                     last_indices = meta.last_indices()
                                     if len(value) != len(last_indices):
-                                        logger.warning(f"no attempt with previously requested indices, no match")
+                                        logger.warning("no attempt with previously requested indices, no match")
                                         continue
                                     else:
-                                        logger.warning(f"attempt with previously requested indices.. (we have a match)")
+                                        logger.warning("attempt with previously requested indices (we have a match)..")
                                         logger.warning(f"dataref array: current value: {value}, previous indices: {last_indices})")
                                         current_indices = last_indices
+
                                 for idx, v1 in zip(current_indices, value):
                                     d1 = f"{meta.name}[{idx}]"
                                     cascade = d1 in self.simulator_variable_to_monitor
