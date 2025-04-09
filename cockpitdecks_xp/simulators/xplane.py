@@ -87,6 +87,8 @@ REPLAY_DATAREFS = [
     "sim/time/paused",
 ]
 RUNNING_TIME = "sim/time/total_flight_time_sec"  # Total time since the flight got reset by something
+AIRCRAFT_LOADED = "sim/aircraft/view/acf_relative_path"  # Path to currently loaded aircraft
+
 # (let's say time since plane was loaded, reloaded, or changed)
 USEFUL_DATAREFS = []  # monitored to determine of cached data is valid  # Total time the sim has been up
 
@@ -325,7 +327,7 @@ class Dataref(SimulatorVariable):
             if self.value_type == "data" and type(raw_value) in [bytes, str]:
                 return base64.b64decode(raw_value).decode("ascii").replace("\u0000", "")
 
-            # 2.1  Number
+            # 2.1  Number (in python, float is double precision)
             elif type(raw_value) not in [int, float]:
                 logger.warning(f"unknown value type for {self.name}: {type(raw_value)}, {raw_value}, expected {self.value_type}")
 
@@ -633,13 +635,11 @@ class Command(XPlaneInstruction):
 
     def rest_execute(self) -> bool:
         if not self.is_valid():
-            logger.error(f"command {self.path} is not valid")
+            logger.error(f"command {self.path} is not an operation")
             return False
         if not self.valid:
-            self.init(cache=self.simulator.all_commands)
-            if not self.valid:
-                logger.error(f"command {self.path} is not valid")
-                return False
+            logger.error(f"command {self.path} is not valid")
+            return False
         payload = {REST_KW.IDENT.value: self.ident, REST_KW.DURATION.value: 0.0}
         url = f"{self.simulator.api_url}/command/{self.ident}/activate"
         response = requests.post(url, json=payload)
@@ -667,12 +667,10 @@ class BeginEndCommand(Command):
         self.is_on = False
 
     def rest_execute(self) -> bool:
-        if not self.valid:
-            self.init(cache=self.simulator.all_commands)
-            if not self.valid:
-                logger.error(f"command {self.path} is not valid")
-                return False
         if not self.is_valid():
+            logger.error(f"command {self.path} is not an operation")
+            return False
+        if not self.valid:
             logger.error(f"command {self.path} is not valid")
             return False
         payload = {REST_KW.IDENT.value: self.ident, REST_KW.DURATION.value: self.DURATION}
@@ -734,10 +732,6 @@ class SetDataref(XPlaneInstruction):
         return "set-dataref: " + self.name
 
     @property
-    def is_internal(self):
-        return self._variable.is_internal
-
-    @property
     def value(self):
         if self.formula is not None:
             if self.text_value is not None:
@@ -753,10 +747,8 @@ class SetDataref(XPlaneInstruction):
 
     def rest_execute(self) -> bool:
         if not self.valid:
-            self.init(cache=self.simulator.all_datarefs)
-            if not self.valid:
-                logger.error(f"dataref {self.path} is not valid")
-                return False
+            logger.error(f"dataref {self.path} is not valid")
+            return False
         value = self.value
         if self.value_type == "data":
             value = str(value).encode("ascii")
@@ -785,7 +777,7 @@ class SetDataref(XPlaneInstruction):
         return self.simulator.set_dataref_value(path=self.path, value=self.value)
 
     def _execute(self):
-        if self.is_internal:
+        if isinstance(self._variable, SimulatorVariable):
             self._variable.update_value(new_value=self.value, cascade=True)
         else:
             super()._execute()
@@ -1005,6 +997,7 @@ class XPlaneREST:
         self.dynamic_timeout = RECONNECT_TIMEOUT
         self._beacon.set_callback(self.beacon_callback)
         self._running_time = Dataref(path=RUNNING_TIME, simulator=self)  # cheating, side effect, works for rest api only, do not force!
+        self._aircraft_path = Dataref(path=AIRCRAFT_LOADED, simulator=self)
 
         self.all_datarefs: Cache | None = None
         self.all_commands: Cache | None = None
@@ -1017,6 +1010,17 @@ class XPlaneREST:
     def api_url(self) -> str:
         """URL for the REST API"""
         return f"http://{self.host}:{self.port}{self._api_root_path}{self._api_version}"
+
+    @property
+    # See https://stackoverflow.com/questions/7019643/overriding-properties-in-python
+    # to overwrite @property definition
+    def is_valid(self) -> bool:
+        """URL for the REST API"""
+        d = self.all_datarefs is not None and self.all_datarefs.has_data
+        c = self.all_commands is not None and self.all_commands.has_data
+        a = self._aircraft_path.rest_value
+        logger.debug(f"is_valid d={d}, c={c}, a={a is not None}")
+        return a is not None and d and c
 
     @property
     def uptime(self) -> float:
@@ -1243,6 +1247,11 @@ class XPlaneWebSocket(XPlaneREST, ABC):
             self._already_warned = self._already_warned + 1
         return res
 
+    @property
+    def connected_and_valid(self) -> bool:
+        print(f">>> is {'' if self.is_valid else 'in'}valid")
+        return self.connected and self.is_valid
+
     def connect_websocket(self):
         if self.ws is None:
             try:
@@ -1439,6 +1448,9 @@ class XPlaneWebSocket(XPlaneREST, ABC):
         for dataref in datarefs.values():
             if type(dataref) is list:
                 meta = self.get_dataref_meta_by_id(dataref[0].ident)  # we modify the global source info, not the local copy in the Dataref()
+                if meta is None:
+                    logger.warning(f"{dataref[0].name}: cannot get meta information")
+                    continue
                 webapi_logger.info(f"INDICES bef: {dataref[0].ident} => {meta.indices}")
                 meta.save_indices()  # indices of "current" requests
                 ilist = []
@@ -1701,12 +1713,17 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
     def get_variables(self) -> set:
         """Returns the list of datarefs for which the xplane simulator wants to be notified."""
         ret = set(PERMANENT_SIMULATOR_VARIABLES)
+        # Simulator variables
         for obs in self.observables:
             ret = ret | obs.get_variables()
-        more = self.cockpit.aircraft.get_variables()
-        if len(more) > 0:
-            ret = ret | more
-        # The Cockpit is not aware of any simulator variable it could ask for
+        # Cockpit variables
+        cockpit_vars = self.cockpit.get_variables()
+        if len(cockpit_vars) > 0:
+            ret = ret | cockpit_vars
+        # Aircraft variables
+        aircraft_vars = self.cockpit.aircraft.get_variables()
+        if len(aircraft_vars) > 0:
+            ret = ret | aircraft_vars
         return ret
 
     def simulator_variable_changed(self, data: SimulatorVariable):
@@ -1784,6 +1801,9 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         for d in varnames:
             dref = self.get_variable(d)
             if dref is not None:
+                if not isinstance(dref, SimulatorVariable):
+                    logger.debug(f"internal variable {d.name} is not monitored")
+                    continue
                 drefs[d] = dref
         logger.info(f"monitoring {len(drefs)} permanent simulator variables")
         if len(drefs) > 0:
@@ -1830,8 +1850,8 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         # Add those to monitor
         datarefs = {}
         for d in simulator_variables.values():
-            if d.is_internal:
-                logger.debug(f"local dataref {d.name} is not monitored")
+            if not isinstance(d, SimulatorVariable):
+                logger.debug(f"variable {d.name} is not a simulator variable")
                 continue
             if not d.is_monitored:
                 ident = d.ident
@@ -1855,7 +1875,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
                         dlist.append(d1.name)
                 else:
                     dlist.append(d.name)
-            logger.log(SPAM_LEVEL, f">>>>> add_simulator_variable_to_monitor: {reason}: added {dlist}")
+            logger.log(SPAM_LEVEL, f">>>>> add_simulator_variables_to_monitor: {reason}: added {dlist}")
             self._max_datarefs_monitored = max(self._max_datarefs_monitored, len(self._dataref_by_id))
         else:
             logger.debug("no variable to add")
@@ -1875,8 +1895,8 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         # Add those to monitor
         datarefs = {}
         for d in simulator_variables.values():
-            if d.is_internal:
-                logger.debug(f"internal variable {d.name} is not monitored")
+            if not isinstance(d, SimulatorVariable):
+                logger.debug(f"variable {d.name} is not a simulator variable")
                 continue
             if d.is_monitored:
                 if not d.unmonitor():  # will be decreased by 1 in super().remove_simulator_variable_to_monitor()
@@ -1926,6 +1946,9 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         datarefs = {}
         for path in self.simulator_variable_to_monitor.keys():
             d = self.cockpit.variable_database.get(path)
+            if not isinstance(d, SimulatorVariable):
+                logger.debug(f"variable {d.name} is not a simulator variable")
+                continue
             if d is not None:
                 ident = d.ident
                 if ident is not None:

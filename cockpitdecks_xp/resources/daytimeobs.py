@@ -10,7 +10,7 @@ from suntime import Sun
 
 from cockpitdecks import DAYTIME
 from cockpitdecks.observable import Observable
-from cockpitdecks.simulator import Simulator, SimulatorVariable
+from cockpitdecks.simulator import Simulator, SimulatorVariable, SimulatorVariableListener
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -22,7 +22,7 @@ LOCAL_DATE = "sim/time/local_date_days"
 ZULU_TIME_SEC = "sim/time/zulu_time_sec"
 
 
-class DaytimeObservable(Observable):
+class DaytimeObservable(Observable, SimulatorVariableListener):
     """Special observable that monitor the aircraft position
     and update the closest weather/airport station every check_time seconds
     if necessary.

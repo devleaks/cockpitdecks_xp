@@ -10,7 +10,7 @@ from avwx import Station
 
 from cockpitdecks import WEATHER_STATION_MONITORING
 from cockpitdecks.observable import Observable
-from cockpitdecks.simulator import Simulator, SimulatorVariable
+from cockpitdecks.simulator import Simulator, SimulatorVariable, SimulatorVariableListener
 
 logger = logging.getLogger(__name__)
 # logger.setLevel(logging.DEBUG)
@@ -20,7 +20,7 @@ LATITUDE = "sim/flightmodel/position/latitude"
 LONGITUDE = "sim/flightmodel/position/longitude"
 
 
-class WeatherStationObservable(Observable):
+class WeatherStationObservable(Observable, SimulatorVariableListener):
     """Special observable that monitor the aircraft position
     and update the closest weather/airport station every check_time seconds
     if necessary.

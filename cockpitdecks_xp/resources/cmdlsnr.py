@@ -4,7 +4,7 @@
 import logging
 
 from cockpitdecks.observable import Observable
-from cockpitdecks.simulator import Simulator, SimulatorEvent
+from cockpitdecks.simulator import Simulator, SimulatorEventListener, SimulatorEvent
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -13,7 +13,7 @@ logger.setLevel(logging.DEBUG)
 MAP = "sim/map/show_current"
 
 
-class MapCommandObservable(Observable):
+class MapCommandObservable(Observable, SimulatorEventListener):
     """Special observable that monitor the aircraft position
     and update the closest weather/airport station every check_time seconds
     if necessary.
@@ -32,7 +32,7 @@ class MapCommandObservable(Observable):
     def get_events(self) -> set:
         return {MAP}
 
-    def simulator_event(self, data: SimulatorEvent):
+    def simulator_event_received(self, data: SimulatorEvent):
         if data.name not in self.get_events():
             return  # not for me, should never happen
 
