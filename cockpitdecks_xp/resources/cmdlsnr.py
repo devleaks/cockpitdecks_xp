@@ -4,7 +4,7 @@
 import logging
 
 from cockpitdecks.observable import Observable
-from cockpitdecks.simulator import Simulator, SimulatorEventListener, SimulatorEvent
+from cockpitdecks.simulator import Simulator, SimulatorActivityListener, SimulatorActivity
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -13,7 +13,7 @@ logger.setLevel(logging.DEBUG)
 MAP = "sim/map/show_current"
 
 
-class MapCommandObservable(Observable, SimulatorEventListener):
+class MapCommandObservable(Observable, SimulatorActivityListener):
     """Special observable that monitor the aircraft position
     and update the closest weather/airport station every check_time seconds
     if necessary.
@@ -24,16 +24,16 @@ class MapCommandObservable(Observable, SimulatorEventListener):
     def __init__(self, simulator: Simulator):
         wso_config = {
             "name": type(self).__name__,
-            "events": [MAP],
+            "activities": [MAP],
             "actions": [{}],
         }
         Observable.__init__(self, config=wso_config, simulator=simulator)
 
-    def get_events(self) -> set:
+    def get_activities(self) -> set:
         return {MAP}
 
-    def simulator_event_received(self, data: SimulatorEvent):
-        if data.name not in self.get_events():
+    def simulator_activity_received(self, data: SimulatorActivity):
+        if data.name not in self.get_activities():
             return  # not for me, should never happen
 
         logger.info("map activated")

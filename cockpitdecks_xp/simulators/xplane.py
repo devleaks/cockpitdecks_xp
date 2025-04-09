@@ -409,7 +409,7 @@ class XPlaneInstruction(SimulatorInstruction, ABC):
     def meta(self) -> CommandMeta | None:
         r = self.simulator.all_commands.get(self.path) if self.simulator.all_commands is not None else None
         if r is None:
-            logger.error(f"dataref {self.path} hos no api meta data")
+            logger.error(f"command {self.path} has no api meta data")
         return r
 
     @property
@@ -419,7 +419,7 @@ class XPlaneInstruction(SimulatorInstruction, ABC):
     @property
     def ident(self) -> int | None:
         if not self.valid:
-            logger.error(f"dataref {self.path} not valid")
+            logger.error(f"command {self.path} not valid")
             return None
         return self.meta.ident
 
@@ -439,7 +439,7 @@ class XPlaneInstruction(SimulatorInstruction, ABC):
 
     @classmethod
     def new(cls, name: str, simulator: XPlane, instruction_block: dict) -> XPlaneInstruction | None:
-        INSTRUCTIONS = [CONFIG_KW.BEGIN_END.value, CONFIG_KW.SET_SIM_VARIABLE.value, CONFIG_KW.COMMAND.value, CONFIG_KW.VIEW.value]
+        # INSTRUCTIONS = [CONFIG_KW.BEGIN_END.value, CONFIG_KW.SET_SIM_VARIABLE.value, CONFIG_KW.COMMAND.value, CONFIG_KW.VIEW.value]
 
         def try_keyword(keyw) -> XPlaneInstruction | None:
             command_block = instruction_block.get(keyw)
@@ -695,6 +695,8 @@ class BeginEndCommand(Command):
 class SetDataref(XPlaneInstruction):
     """
     Instruction to update the value of a dataref in X-Plane simulator.
+
+    We only use XPlaneInstruction._execute().
     """
 
     def __init__(
@@ -708,23 +710,27 @@ class SetDataref(XPlaneInstruction):
         condition: str | None = None,
     ):
         XPlaneInstruction.__init__(self, name=path, simulator=simulator, delay=delay, condition=condition)
+
+        # 1. Variable to set
         self.path = path  # some/dataref/to/set
         self._variable = simulator.get_variable(path)
 
-        # Generic, non computed static fixed value
+        # 2. Value to set
+        # Case 1: Generic, non computed static fixed value
         self._value = value
 
-        # Formula are for numeric value
+        # Case 2: Formula for numeric value
         self._formula = formula
         self.formula = None
         if self._formula is not None:
             self.formula = Formula(owner=simulator, formula=formula)  # no button, no formula?
 
-        # Text value are for string
+        # Case 3: Text value for string
         self._text_value = text_value
         self.text_value = None
         if self._text_value is not None:
             self.text_value = StringWithVariables(owner=simulator, message=self._text_value, name=f"{type(self).__name__}({self.path})")
+
         if self.formula is not None and self.text_value is not None:
             logger.warning(f"{type(self).__name__} for {self.path} has both formula and text value")
 
@@ -743,44 +749,48 @@ class SetDataref(XPlaneInstruction):
 
     @value.setter
     def value(self, value):
+        # Set static value
         self._value = value
+
+    @property
+    def valid(self) -> bool:
+        return self._variable.valid if isinstance(self._variable, Dataref) else True
 
     def rest_execute(self) -> bool:
         if not self.valid:
-            logger.error(f"dataref {self.path} is not valid")
+            logger.error(f"set-dataref: dataref {self._variable.name} is not valid")
             return False
         value = self.value
         if self.value_type == "data":
             value = str(value).encode("ascii")
             value = base64.b64encode(value).decode("ascii")
+        ident = self._variable.ident
         payload = {REST_KW.DATA.value: self.value}
-        url = f"{self.simulator.api_url}/datarefs/{self.ident}/value"
+        url = f"{self.simulator.api_url}/datarefs/{ident}/value"
         response = requests.patch(url, json=payload)
         webapi_logger.info(f"PATCH {url} {payload} {response}")
         if response.status_code == 200:
             return True
         if response.status_code == 403:
-            logger.warning(f"{self.name}: dataref not writable")
+            logger.warning(f"{self._variable.name}: dataref not writable")
             return False
         logger.error(f"execute: {response}")
         return False
 
     def ws_execute(self) -> int:
         if not self.valid:
-            logger.error(f"set-dataref {self.path} invalid")
-            return -1
-        if Dataref.is_internal_variable(self.path):
-            d = self.get_variable(self.path)
-            d.update_value(new_value=self.value, cascade=True)
-            logger.debug(f"written local dataref ({self.path}={self.value})")
+            logger.error(f"set-dataref: dataref {self._variable.name} is not valid")
             return -1
         return self.simulator.set_dataref_value(path=self.path, value=self.value)
 
     def _execute(self):
-        if isinstance(self._variable, SimulatorVariable):
-            self._variable.update_value(new_value=self.value, cascade=True)
-        else:
+        if isinstance(self._variable, Dataref):
+            logger.debug(f"{self.name}: updating {self._variable.name}..")
             super()._execute()
+            logger.debug(f"{self.name}: ..updated")
+        else:
+            self._variable.update_value(new_value=self.value, cascade=True)
+            logger.debug(f"{self.name}: updated variable {self._variable.name} to {self.value}")
 
 
 # Events from simulator
@@ -814,6 +824,27 @@ class CommandActiveEvent(SimulatorEvent):
     def run(self, just_do_it: bool = False) -> bool:
         # derifed classes may perform more sophisticated actions
         # to chain one or more action, use observables based on simulator events.
+
+        if just_do_it:
+            if self.sim is None:
+                logger.warning("no simulator")
+                return False
+
+            # should be: dataref = self.sim.get_variable(self.dataref_path)
+            activity = self.sim.cockpit.activity_database.get(self.name)
+            if activity is None:
+                logger.debug(f"activity {self.name} not found in database")
+                return False
+            try:
+                logger.debug(f"activating {activity.name}..")
+                self.handling()
+                activity.activate(value=self.is_active, cascade=self.cascade)
+                self.handled()
+                logger.debug("..activated")
+            except:
+                logger.warning("..activated with error", exc_info=True)
+                return False
+
         if just_do_it:
             logger.info(f"event {self.name} occured in simulator with active={self.is_active}")
         else:
@@ -1711,7 +1742,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
     #
     # Datarefs
     def get_variables(self) -> set:
-        """Returns the list of datarefs for which the xplane simulator wants to be notified."""
+        """Returns the list of datarefs for which cockpitdecks wants to be notified of changes."""
         ret = set(PERMANENT_SIMULATOR_VARIABLES)
         # Simulator variables
         for obs in self.observables:
@@ -1731,15 +1762,15 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
 
     #
     # Events
-    def get_events(self) -> set:
-        """Returns the list of datarefs for which the xplane simulator wants to be notified."""
+    def get_activities(self) -> set:
+        """Returns the list of commands for which cockpitdecks wants to be notified of activation."""
         ret = set(PERMANENT_SIMULATOR_EVENTS)
         for obs in self.observables:
-            ret = ret | obs.get_events()
-        more = self.cockpit.aircraft.get_events()
+            ret = ret | obs.get_activities()
+        # Add cockpit's, which includes aircraft's
+        more = self.cockpit.get_activities()
         if len(more) > 0:
             ret = ret | more
-        # The Cockpit is not aware of any simulator event it could ask for
         return ret
 
     # ################################
@@ -1802,7 +1833,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
             dref = self.get_variable(d)
             if dref is not None:
                 if not isinstance(dref, SimulatorVariable):
-                    logger.debug(f"internal variable {d.name} is not monitored")
+                    logger.debug(f"variable {dref.name} is not a simulator variable, not monitored")
                     continue
                 drefs[d] = dref
         logger.info(f"monitoring {len(drefs)} permanent simulator variables")
@@ -1840,7 +1871,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         #     return
         # logger.log(SPAM_LEVEL, f">>>>> currently monitored variables:\n{'\n'.join(sorted([d.name for d in self._dataref_by_id.values()]))}")
 
-    def add_simulator_variables_to_monitor(self, simulator_variables, reason: str | None = None):
+    def add_simulator_variables_to_monitor(self, simulator_variables: dict, reason: str | None = None):
         if not self.connected:
             logger.debug(f"would add {list(filter(lambda d: not Dataref.is_internal_variable(d), simulator_variables))}")
             return
@@ -1849,6 +1880,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
             return
         # Add those to monitor
         datarefs = {}
+        effectives = {}
         for d in simulator_variables.values():
             if not isinstance(d, SimulatorVariable):
                 logger.debug(f"variable {d.name} is not a simulator variable")
@@ -1863,7 +1895,8 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
                     else:
                         datarefs[ident] = d
             d.monitor()
-        super().add_simulator_variables_to_monitor(simulator_variables=simulator_variables)
+            effectives[d.name] = d
+        super().add_simulator_variables_to_monitor(simulator_variables=effectives)
 
         if len(datarefs) > 0:
             self.register_bulk_dataref_value_event(datarefs=datarefs, on=True)
@@ -1894,11 +1927,13 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
             return
         # Add those to monitor
         datarefs = {}
+        effectives = {}
         for d in simulator_variables.values():
             if not isinstance(d, SimulatorVariable):
                 logger.debug(f"variable {d.name} is not a simulator variable")
                 continue
             if d.is_monitored:
+                effectives[d.name] = d
                 if not d.unmonitor():  # will be decreased by 1 in super().remove_simulator_variable_to_monitor()
                     ident = d.ident
                     if ident is not None:
@@ -1912,7 +1947,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
                     logger.debug(f"{d.name} monitored {d.monitored_count} times, not removed")
             else:
                 logger.debug(f"no need to remove {d.name}, not monitored")
-        super().remove_simulator_variables_to_monitor(simulator_variables=simulator_variables)
+        super().remove_simulator_variables_to_monitor(simulator_variables=effectives)
 
         if len(datarefs) > 0:
             self.register_bulk_dataref_value_event(datarefs=datarefs, on=False)
@@ -1945,7 +1980,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         # Add those to monitor
         datarefs = {}
         for path in self.simulator_variable_to_monitor.keys():
-            d = self.cockpit.variable_database.get(path)
+            d = self.get_variable(path)
             if not isinstance(d, SimulatorVariable):
                 logger.debug(f"variable {d.name} is not a simulator variable")
                 continue
@@ -1981,7 +2016,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         # self.create_permanent_observables() should be called before
         # like in add_permanently_monitored_simulator_variables()
         self.create_permanent_observables()
-        cmds = self.get_events()
+        cmds = self.get_activities()
         logger.info(f"monitoring {len(cmds)} permanent simulator events")
         if len(cmds) > 0:
             self.add_simulator_events_to_monitor(simulator_events=cmds, reason="permanent simulator events")
