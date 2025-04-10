@@ -1485,13 +1485,13 @@ class XPlaneWebSocket(XPlaneREST, ABC):
                 webapi_logger.info(f"INDICES bef: {dataref[0].ident} => {meta.indices}")
                 meta.save_indices()  # indices of "current" requests
                 ilist = []
-                otext = "on "
+                otext = "add"
                 for d1 in dataref:
                     ilist.append(d1.index)
                     if on:
                         meta.append_index(d1.index)
                     else:
-                        otext = "off"
+                        otext = "del"
                         meta.remove_index(d1.index)
                     meta._last_req_number = self.req_number  # not 100% correct, but sufficient
                 drefs.append({REST_KW.IDENT.value: dataref[0].ident, REST_KW.INDEX.value: ilist})
@@ -1725,6 +1725,8 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
             with open(fn, "r") as fp:
                 config = yaml.load(fp)
             self._observables = Observables(config=config, simulator=self)
+            for o in self._observables.get_observables():
+                self.cockpit.register_observable(o)
             logger.info(f"loaded {len(self._observables.observables)} {self.name} simulator observables")
         else:
             logger.info(f"no {self.name} simulator observables")
@@ -1736,6 +1738,8 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         if len(self._permanent_observables) > 0 or len(cd_obs) == 0:
             return
         self._permanent_observables = [obs(simulator=self) for obs in cd_obs]
+        for o in self._permanent_observables:
+            self.cockpit.register_observable(o)
         logger.info(f"loaded {len(self._permanent_observables)} permanent simulator observables")
         self.load_observables()
 
