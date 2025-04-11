@@ -35,9 +35,9 @@ observables:
         text: ${sim/aircraft/view/acf_livery_path}
   # Demo of command active event
   - name: QNH adjusted
-    type: event
+    type: activity
     enabled: True
-    events:
+    activities:
       - sim/instruments/barometer_up
       - sim/instruments/barometer_down
     actions:

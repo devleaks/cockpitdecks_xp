@@ -7,7 +7,7 @@ from cockpitdecks.observable import Observable
 from cockpitdecks.simulator import Simulator, SimulatorActivityListener, SimulatorActivity
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+# logger.setLevel(logging.DEBUG)
 
 
 MAP = "sim/map/show_current"

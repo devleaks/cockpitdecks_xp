@@ -11,6 +11,7 @@ import json
 import base64
 
 from abc import ABC, abstractmethod
+from typing import List
 from enum import Enum
 from datetime import datetime, timedelta
 
@@ -31,7 +32,7 @@ from cockpitdecks.instruction import MacroInstruction
 from cockpitdecks.simulator import Simulator, SimulatorEvent, SimulatorInstruction
 from cockpitdecks.simulator import SimulatorVariable, SimulatorVariableListener
 from cockpitdecks.resources.intvariables import COCKPITDECKS_INTVAR
-from cockpitdecks.observable import Observables
+from cockpitdecks.observable import Observables, Observable
 
 from ..resources.beacon import XPlaneBeacon, BEACON_DATA_KW
 
@@ -438,12 +439,11 @@ class XPlaneInstruction(SimulatorInstruction, ABC):
         return self.path is not None and self.path.lower().replace("-", "") in NOT_A_COMMAND
 
     @classmethod
-    def new(cls, name: str, simulator: XPlane, instruction_block: dict) -> XPlaneInstruction | None:
+    def new(cls, name: str, simulator: XPlane, instruction_block: dict | list | tuple) -> XPlaneInstruction | None:
         # INSTRUCTIONS = [CONFIG_KW.BEGIN_END.value, CONFIG_KW.SET_SIM_VARIABLE.value, CONFIG_KW.COMMAND.value, CONFIG_KW.VIEW.value]
 
-        def try_keyword(keyw) -> XPlaneInstruction | None:
-            command_block = instruction_block.get(keyw)
-
+        def try_keyword(ib, keyw) -> XPlaneInstruction | None:
+            command_block = ib.get(keyw)
             # single simple command to execute
             if type(command_block) is str:
                 # Examples:
@@ -465,40 +465,36 @@ class XPlaneInstruction(SimulatorInstruction, ABC):
                 #  command: sim/apu/fire_test
                 #  => is translated into the activation into the instruction block
                 #  {"begin-end": "sim/apu/fire_test"}
+                condition = ib.get(CONFIG_KW.CONDITION.value)
+                delay = ib.get(CONFIG_KW.DELAY.value, 0.0)
+
                 match keyw:
 
                     case CONFIG_KW.BEGIN_END.value:
-                        return BeginEndCommand(name=name, simulator=simulator, path=command_block)
+                        return BeginEndCommand(name=name, simulator=simulator, path=command_block, delay=delay, condition=condition)
 
                     case CONFIG_KW.SET_SIM_VARIABLE.value:
                         # Parse instruction_block to get values
                         # to do: If no value to set, use value of parent dataref (dataref in parent block)
                         return SetDataref(
-                            simulator=simulator, path=command_block, formula=instruction_block.get("formula"), text_value=instruction_block.get("text")
+                            simulator=simulator,
+                            path=command_block,
+                            formula=instruction_block.get("formula"),
+                            text_value=instruction_block.get("text"),
+                            delay=delay,
+                            condition=condition,
                         )
 
                     case CONFIG_KW.COMMAND.value:
-                        return Command(
-                            name=name,
-                            simulator=simulator,
-                            path=command_block,
-                        )
+                        return Command(name=name, simulator=simulator, path=command_block, delay=delay, condition=condition)
 
                     case CONFIG_KW.VIEW.value:
                         logger.log(DEPRECATION_LEVEL, "«view» command no longer available, use regular command instead")
-                        return Command(
-                            name=name,
-                            simulator=simulator,
-                            path=command_block,
-                        )
+                        return Command(name=name, simulator=simulator, path=command_block, delay=delay, condition=condition)
 
                     case CONFIG_KW.LONG_PRESS.value:
                         logger.log(DEPRECATION_LEVEL, "long press commands no longer available, use regular command instead")
-                        return Command(
-                            name=name,
-                            simulator=simulator,
-                            path=command_block,
-                        )
+                        return Command(name=name, simulator=simulator, path=command_block, delay=delay, condition=condition)
 
                     case _:
                         logger.warning(f"no instruction for {keyw}")
@@ -520,7 +516,8 @@ class XPlaneInstruction(SimulatorInstruction, ABC):
             if type(command_block) is dict:
                 # Single instruction block
                 # Example:
-                #  begin-end: airbus/fire_eng1/test
+                # - command: AirbusFBW/PopUpSD
+                #   condition: ${AirbusFBW/PopUpStateArray[7]} not
                 if CONFIG_KW.BEGIN_END.value in command_block:
                     cmdargs = command_block.get(CONFIG_KW.BEGIN_END.value)
                     if type(cmdargs) is str:
@@ -571,14 +568,7 @@ class XPlaneInstruction(SimulatorInstruction, ABC):
             return None
 
         if type(instruction_block) in [list, tuple]:
-            return MacroInstruction(
-                name=name,
-                performer=simulator,
-                factory=simulator.cockpit,
-                instructions=instruction_block,
-                delay=instruction_block.get(CONFIG_KW.DELAY.value, 0.0),
-                condition=instruction_block.get(CONFIG_KW.CONDITION.value),
-            )
+            return MacroInstruction(name=name, performer=simulator, factory=simulator.cockpit, instructions=instruction_block)
 
         if type(instruction_block) is not dict:
             logger.warning(f"invalid instruction block {instruction_block} ({type(instruction_block)})")
@@ -593,7 +583,7 @@ class XPlaneInstruction(SimulatorInstruction, ABC):
         # a string (single instruction), an instruction block, or a list of instructions,
         # we return None to signify "not found". Warning message also issued.
         for keyword in [CONFIG_KW.BEGIN_END.value, CONFIG_KW.SET_SIM_VARIABLE.value, CONFIG_KW.COMMAND.value, CONFIG_KW.VIEW.value]:
-            attempt = try_keyword(keyword)
+            attempt = try_keyword(instruction_block, keyword)
             if attempt is not None:
                 # logger.debug(f"got {keyword} in {instruction_block}")
                 return attempt
@@ -826,14 +816,13 @@ class CommandActiveEvent(SimulatorEvent):
         # to chain one or more action, use observables based on simulator events.
 
         if just_do_it:
+            logger.debug(f"event {self.name} occured in simulator with active={self.is_active}")
             if self.sim is None:
                 logger.warning("no simulator")
                 return False
-
-            # should be: dataref = self.sim.get_variable(self.dataref_path)
             activity = self.sim.cockpit.activity_database.get(self.name)
             if activity is None:
-                logger.debug(f"activity {self.name} not found in database")
+                logger.warning(f"activity {self.name} not found in database")
                 return False
             try:
                 logger.debug(f"activating {activity.name}..")
@@ -845,8 +834,6 @@ class CommandActiveEvent(SimulatorEvent):
                 logger.warning("..activated with error", exc_info=True)
                 return False
 
-        if just_do_it:
-            logger.info(f"event {self.name} occured in simulator with active={self.is_active}")
         else:
             self.enqueue()
             logger.debug("enqueued")
@@ -1280,7 +1267,7 @@ class XPlaneWebSocket(XPlaneREST, ABC):
 
     @property
     def connected_and_valid(self) -> bool:
-        print(f">>> is {'' if self.is_valid else 'in'}valid")
+        logger.info(f">>> is {'' if self.is_valid else 'in'}valid")
         return self.connected and self.is_valid
 
     def connect_websocket(self):
@@ -1612,15 +1599,16 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         self.cmdevents = set()  # list of command active events currently monitored
         self._max_events_monitored = 0
 
-        self.ws_thread = None
-        self._permanent_observables = []  # cannot create them now since XPlane does not exist yet
-        self._observables: Observables | None = None  # local config observables for this simulator
+        self._permanent_observables: List[Observable] = []  # cannot create them now since XPlane does not exist yet (subclasses of Observable)
+        self._observables: Observables | None = None  # local config observables for this simulator <sim>/resources/observables.yaml
 
         self.xp_home = environ.get(ENVIRON_KW.SIMULATOR_HOME.value)
         self.api_host = environ.get(ENVIRON_KW.API_HOST.value, "127.0.0.1")
         self.api_port = environ.get(ENVIRON_KW.API_PORT.value, 8086)
         self.api_path = environ.get(ENVIRON_KW.API_PATH.value, "/api")
         self.api_version = environ.get(ENVIRON_KW.API_VERSION.value, "v1")
+
+        self.ws_thread: threading.Thread | None = None
 
         Simulator.__init__(self, cockpit=cockpit, environ=environ)
         XPlaneWebSocket.__init__(self, host=self.api_host[0], port=self.api_host[1], api=self.api_path, api_version=self.api_version)
@@ -2140,10 +2128,9 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
                 return [round(l, local_r) for l in local_value]
             return local_value
 
-        logger.log(SPAM_LEVEL, "starting websocket listener..")
+        logger.info("starting websocket listener..")
         RECEIVE_TIMEOUT = 1  # when not connected, checks often
         total_reads = 0
-        print_zulu = 0
         to_count = 0
         TO_COUNT_SPAM = 10
         TO_COUNT_INFO = 50
@@ -2155,16 +2142,16 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
             try:
                 message = self.ws.receive(timeout=RECEIVE_TIMEOUT)
                 if message is None:
-                    to_count = to_count + 1
                     if to_count % TO_COUNT_INFO == 0:
-                        logger.info("waiting for data from simulator..")  # at {datetime.now()}")
+                        logger.info("..waiting for data from simulator..")  # at {datetime.now()}")
                     elif to_count % TO_COUNT_SPAM == 0:
-                        logger.log(SPAM_LEVEL, "waiting for data from simulator..")  # at {datetime.now()}")
+                        logger.log(SPAM_LEVEL, "..waiting for data from simulator..")  # at {datetime.now()}")
+                    to_count = to_count + 1
                     continue
 
                 now = datetime.now()
                 if total_reads == 0:
-                    logger.log(SPAM_LEVEL, f"..first message at {now} ({round((now - start_time).seconds, 2)} secs.)")
+                    logger.log(logging.INFO, f"..first message after {(now - start_time).seconds} secs..")  # SPAM_LEVEL
                     RECEIVE_TIMEOUT = 5  # when connected, check less often, message will arrive
                 # Estimate response time
                 self.set_internal_variable(name=COCKPITDECKS_INTVAR.INTDREF_CONNECTION_STATUS.value, value=4, cascade=True)
@@ -2336,10 +2323,10 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
 
     def stop(self):
         if not self.ws_event.is_set():
-            if self.all_datarefs is not None:
-                self.all_datarefs.save("datarefs.json")
-            if self.all_commands is not None:
-                self.all_commands.save("commands.json")
+            # if self.all_datarefs is not None:
+            #     self.all_datarefs.save("datarefs.json")
+            # if self.all_commands is not None:
+            #     self.all_commands.save("commands.json")
             self.ws_event.set()
             if self.ws_thread is not None and self.ws_thread.is_alive():
                 logger.debug("stopping websocket listener..")
