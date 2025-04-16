@@ -33,11 +33,11 @@ from cockpitdecks.simulator import Simulator, SimulatorEvent, SimulatorInstructi
 from cockpitdecks.simulator import SimulatorVariable, SimulatorVariableListener
 from cockpitdecks.resources.intvariables import COCKPITDECKS_INTVAR
 from cockpitdecks.observable import Observables, Observable
-
+from cockpitdecks.cockpit import CockpitInstruction
 from ..resources.beacon import XPlaneBeacon, BEACON_DATA_KW
 
 logger = logging.getLogger(__name__)
-# logger.setLevel(SPAM_LEVEL)  # To see which dataref are requested
+logger.setLevel(DEPRECATION_LEVEL)  # To see which dataref are requested
 # logger.setLevel(logging.DEBUG)
 
 WEBAPILOGFILE = "webapi.log"
@@ -486,10 +486,20 @@ class XPlaneInstruction(SimulatorInstruction, ABC):
                         )
 
                     case CONFIG_KW.COMMAND.value:
+                        if CockpitInstruction.is_cockpit_instruction(command_block):
+                            ci = CockpitInstruction.new(cockpit=simulator.cockpit, name=name, instruction=command_block, instruction_block=ib)
+                            if ci is not None:
+                                return ci
+                            logger.warning(f"{name}: could not create Cockpit Instruction ({command_block}, {ib})")
                         return Command(name=name, simulator=simulator, path=command_block, delay=delay, condition=condition)
 
                     case CONFIG_KW.VIEW.value:
                         logger.log(DEPRECATION_LEVEL, "«view» command no longer available, use regular command instead")
+                        if CockpitInstruction.is_cockpit_instruction(command_block):
+                            ci = CockpitInstruction.new(cockpit=simulator.cockpit, name=name, instruction=command_block, instruction_block=ib)
+                            if ci is not None:
+                                return ci
+                            logger.warning(f"{name}: could not create Cockpit Instruction ({command_block}, {ib})")
                         return Command(name=name, simulator=simulator, path=command_block, delay=delay, condition=condition)
 
                     case CONFIG_KW.LONG_PRESS.value:
