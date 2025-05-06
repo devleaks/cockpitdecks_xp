@@ -2135,7 +2135,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         def dref_round_arr(local_path: str, local_value):
             local_r = self.get_rounding(simulator_variable_name=local_path)
             if local_r is not None:
-                return [round(l, local_r) for l in local_value]
+                return [round(v, local_r) for v in local_value]
             return local_value
 
         logger.info("starting websocket listener..")
@@ -2143,7 +2143,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         total_reads = 0
         to_count = 0
         TO_COUNT_SPAM = 10
-        TO_COUNT_INFO = 50
+        TO_COUNT_INFO = 60  # ~ 1 min.
         start_time = datetime.now()
         last_read_ts = start_time
         total_read_time = 0.0
@@ -2152,10 +2152,11 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
             try:
                 message = self.ws.receive(timeout=RECEIVE_TIMEOUT)
                 if message is None:
-                    if to_count % TO_COUNT_INFO == 0:
-                        logger.info("..waiting for data from simulator..")  # at {datetime.now()}")
-                    elif to_count % TO_COUNT_SPAM == 0:
-                        logger.log(SPAM_LEVEL, "..waiting for data from simulator..")  # at {datetime.now()}")
+                    if total_reads == 0:
+                        if to_count % TO_COUNT_INFO == 0:
+                            logger.info("..waiting for data from simulator..")  # at {datetime.now()}")
+                        elif to_count % TO_COUNT_SPAM == 0:
+                            logger.log(SPAM_LEVEL, "..waiting for data from simulator..")  # at {datetime.now()}")
                     to_count = to_count + 1
                     continue
 
