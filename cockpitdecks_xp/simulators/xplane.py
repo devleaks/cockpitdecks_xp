@@ -1690,7 +1690,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
 
     def rebuild_dataref_ids(self):
         if self.all_datarefs.has_data and len(self._dataref_by_id) > 0:
-            self._dataref_by_id = {d.ident: d for d in self._dataref_by_id}
+            self._dataref_by_id = {d.ident: d for d in self._dataref_by_id.values()}
             logger.info("dataref ids rebuilt")
             return
         logger.warning("no data to rebuild dataref ids")
