@@ -35,6 +35,7 @@ from cockpitdecks.resources.intvariables import COCKPITDECKS_INTVAR
 from cockpitdecks.observable import Observables, Observable
 from cockpitdecks.cockpit import CockpitInstruction
 from ..resources.beacon import XPlaneBeacon, BEACON_DATA_KW
+from ..resources.daytimeobs import DaytimeObservable
 
 logger = logging.getLogger(__name__)
 logger.setLevel(DEPRECATION_LEVEL)  # To see which dataref are requested
@@ -1638,6 +1639,10 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
         self.register_bulk_dataref_value_event(datarefs=self._dataref_by_id, on=False)
         self._dataref_by_id = {}
         self.disconnect()
+
+    def is_night(self) -> bool:
+        obs = list(filter(lambda o: type(o) is DaytimeObservable, self.observables))
+        return obs[0].is_night() if len(obs) > 0 else False
 
     def init(self):
         if self._inited:

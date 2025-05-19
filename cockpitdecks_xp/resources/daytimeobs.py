@@ -48,6 +48,12 @@ class DaytimeObservable(Observable, SimulatorVariableListener):
     def get_variables(self) -> set:
         return {LATITUDE, LONGITUDE, LOCAL_DATE, ZULU_TIME_SEC}
 
+    def is_night(self) -> bool:
+        return self._value == 0
+
+    def is_day(self) -> bool:
+        return self._value == 1
+
     def simulator_variable_changed(self, data: SimulatorVariable):
         if (datetime.now() - self._last_checked).seconds < self.check_time:
             return  # too early to change
