@@ -9,6 +9,7 @@ import threading
 import logging
 import json
 import base64
+import time
 
 from abc import ABC, abstractmethod
 from typing import List
@@ -172,7 +173,8 @@ class Dataref(SimulatorVariable):
     def meta(self) -> DatarefMeta | None:
         r = self.simulator.all_datarefs.get(self.path) if self.simulator.all_datarefs is not None else None
         if r is None:
-            logger.error(f"dataref {self.path} has no api meta data")
+            if self.simulator._can_complain:
+                logger.error(f"dataref {self.path} has no api meta data")
         return r
 
     @property
@@ -221,7 +223,8 @@ class Dataref(SimulatorVariable):
     @property
     def rest_value(self):
         if not self.valid:
-            logger.error(f"dataref {self.path} not valid")
+            if self.simulator._can_complain:
+                logger.error(f"dataref {self.path} not valid")
             return False
         url = f"{self.simulator.api_url}/datarefs/{self.ident}/value"
         response = requests.get(url)
@@ -1032,24 +1035,35 @@ class XPlaneREST:
         self.all_commands: Cache | None = None
         self._last_updated = 0
         self._warning_count = 0
+        self._can_complain = False
 
     @property
-    # See https://stackoverflow.com/questions/7019643/overriding-properties-in-python
-    # to overwrite @property definition
     def api_url(self) -> str:
         """URL for the REST API"""
         return f"http://{self.host}:{self.port}{self._api_root_path}{self._api_version}"
 
     @property
-    # See https://stackoverflow.com/questions/7019643/overriding-properties-in-python
-    # to overwrite @property definition
     def is_valid(self) -> bool:
-        """URL for the REST API"""
-        d = self.all_datarefs is not None and self.all_datarefs.has_data
-        c = self.all_commands is not None and self.all_commands.has_data
+        """is_valid if aircraft datarefs are available"""
+        if self.aircraft_loaded:
+            res = f"{self.name}: "
+            d = self.all_datarefs is not None and self.all_datarefs.has_data
+            if d:
+                res = res + f"loaded {self.all_datarefs.count} dataref meta"
+            c = self.all_commands is not None and self.all_commands.has_data
+            if d:
+                res = res + f", loaded {self.all_commands.count} commands meta"
+            res = res + ", aircraft loaded, valid"
+            return d and c
+        logger.debug(f"{self.name}: no aircraft loaded, invalid")
+        return False
+
+    @property
+    def aircraft_loaded(self) -> bool:
         a = self._aircraft_path.rest_value
-        logger.debug(f"is_valid d={d}, c={c}, a={a is not None}")
-        return a is not None and d and c
+        ret = a is not None and a != ""
+        # logger.info(f"{self.name}: aircraft loaded ({a})" if ret else "no aircraft")
+        return ret
 
     @property
     def uptime(self) -> float:
@@ -1178,17 +1192,18 @@ class XPlaneREST:
             return
         logger.warning(f"could not check api {api} in {capabilities}")
 
-    def reload_caches(self):
+    def reload_caches(self, force: bool = False):
         MINTIME_BETWEEN_RELOAD = 10  # seconds
-        if self._last_updated != 0:
-            currtime = self._running_time.rest_value
-            if currtime is not None:
-                difftime = currtime - self._last_updated
-                if difftime < MINTIME_BETWEEN_RELOAD:
-                    logger.info(f"dataref cache not updated, updated {round(difftime, 1)} secs. ago")
-                    return
-            else:
-                logger.warning("no value for sim/time/total_running_time_sec")
+        if not force:
+            if self._last_updated != 0:
+                currtime = self._running_time.rest_value
+                if currtime is not None:
+                    difftime = currtime - self._last_updated
+                    if difftime < MINTIME_BETWEEN_RELOAD:
+                        logger.info(f"dataref cache not updated, updated {round(difftime, 1)} secs. ago")
+                        return
+                else:
+                    logger.warning("no value for sim/time/total_running_time_sec")
         self.all_datarefs = Cache(self)
         self.all_datarefs.load("/datarefs")
         self.all_datarefs.save("webapi-datarefs.json")
@@ -1198,12 +1213,16 @@ class XPlaneREST:
             self.all_commands.save("webapi-commands.json")
         currtime = self._running_time.rest_value
         if currtime is not None:
-            self._last_updated = self._running_time.rest_value
+            if self.aircraft_loaded:
+                self._last_updated = self._running_time.rest_value
+            else:
+                logger.warning("some datarefs and/or commands loaded but no aircraft")
         else:
             logger.warning("no value for sim/time/total_running_time_sec")
-        logger.info(
-            f"dataref cache ({self.all_datarefs.count}) and command cache ({self.all_commands.count}) reloaded, sim uptime {str(timedelta(seconds=int(self.uptime)))}"
-        )
+        if self.all_datarefs.count > 0 or self.all_commands.count > 0:
+            logger.info(
+                f"dataref cache ({self.all_datarefs.count}) and command cache ({self.all_commands.count}) reloaded, sim uptime {str(timedelta(seconds=int(self.uptime)))}"
+            )
 
     def get_dataref_meta_by_name(self, path: str) -> DatarefMeta | None:
         return self.all_datarefs.get_by_name(path) if self.all_datarefs is not None else None
@@ -1245,6 +1264,9 @@ class XPlaneWebSocket(XPlaneREST, ABC):
         self._already_warned = 0
         self._stats = {}
 
+        self._wait_for_aircraft = threading.Event()
+        self._wait_for_aircraft.set()
+
     @property
     def next_req(self) -> int:
         """Provides request number for WebSocket requests"""
@@ -1278,7 +1300,11 @@ class XPlaneWebSocket(XPlaneREST, ABC):
 
     @property
     def connected_and_valid(self) -> bool:
-        logger.info(f">>> is {'' if self.is_valid else 'in'}valid")
+        res = f"{self.name} "
+        res = res + ("connected" if self.connected else "not connected")
+        if self.connected:
+            res = res + (", valid" if self.is_valid else ", no aircraft loaded")
+        logger.info(res)
         return self.connected and self.is_valid
 
     def connect_websocket(self):
@@ -1289,7 +1315,7 @@ class XPlaneWebSocket(XPlaneREST, ABC):
                     url = self.ws_url
                     if url is not None:
                         self.ws = Client.connect(url)
-                        self.reload_caches()
+                        self.wait_for_aircraft()
                         logger.info(f"websocket opened at {url}")
                     else:
                         logger.warning(f"web socket url is none {url}")
@@ -1305,6 +1331,19 @@ class XPlaneWebSocket(XPlaneREST, ABC):
             logger.info("websocket closed")
         else:
             logger.warning("already disconnected")
+
+    def wait_for_aircraft(self):
+        logger.info(f"{self.name}: waiting for aircraft..")
+        self._wait_for_aircraft.clear()
+        while not self._wait_for_aircraft.is_set():
+            self.reload_caches()
+            if self.connected_and_valid:
+                self._wait_for_aircraft.set()
+            else:
+                logger.info(f"{self.name}: ..waiting for aircraft..")
+                self._wait_for_aircraft.wait(5)
+        self._can_complain = True
+        logger.info(f"{self.name}: ..aircraft loaded")
 
     def connect_loop(self):
         """
@@ -1699,6 +1738,9 @@ class XPlane(Simulator, SimulatorVariableListener, XPlaneWebSocket):
             logger.info("dataref ids rebuilt")
             return
         logger.warning("no data to rebuild dataref ids")
+
+    def aircraft_changed(self):
+        self.reload_caches(force=True)
 
     # ################################
     # Observables
