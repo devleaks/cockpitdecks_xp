@@ -9,7 +9,7 @@ import threading
 import logging
 import json
 import base64
-import time
+
 
 from abc import ABC, abstractmethod
 from typing import List
@@ -35,7 +35,8 @@ from cockpitdecks.simulator import SimulatorVariable, SimulatorVariableListener
 from cockpitdecks.resources.intvariables import COCKPITDECKS_INTVAR
 from cockpitdecks.observable import Observables, Observable
 from cockpitdecks.cockpit import CockpitInstruction
-from ..resources.beacon import XPlaneBeacon, BEACON_DATA_KW
+# from ..resources.beacon import XPlaneBeacon, BEACON_DATA_KW
+from xpwebapi import beacon as XPlaneBeacon
 from ..resources.daytimeobs import DaytimeObservable
 
 logger = logging.getLogger(__name__)
@@ -1115,23 +1116,23 @@ class XPlaneREST:
                     self.host = "127.0.0.1"
                     self.port = 8086
                 else:
-                    self.host = self._beacon.beacon_data[BEACON_DATA_KW.IP.value]
+                    self.host = self._beacon.beacon.host
                     self.port = 8080
-                xp_version = self._beacon.beacon_data.get(BEACON_DATA_KW.XPVERSION.value)
+                xp_version = self._beacon.beacon.xplane_version
                 if xp_version is not None:
                     use_rest = ", use REST" if USE_REST and not same_host else ""
-                    if self._beacon.beacon_data[BEACON_DATA_KW.XPVERSION.value] >= 121400:
+                    if xp_version >= 121400:
                         self._api_version = "/v2"
                         self._first_try = True
                         logger.info(f"XPlane API at {self.api_url} from UDP beacon data{use_rest}")
-                    elif self._beacon.beacon_data[BEACON_DATA_KW.XPVERSION.value] >= 121100:
+                    elif xp_version >= 121100:
                         self._api_version = "/v1"
                         self._first_try = True
                         logger.info(f"XPlane API at {self.api_url} from UDP beacon data{use_rest}")
                     else:
-                        logger.warning(f"could not set API version from {xp_version} ({self._beacon.beacon_data})")
+                        logger.warning(f"could not set API version from {xp_version} ({self._beacon.beacon})")
                 else:
-                    logger.warning(f"could not get X-Plane version from {self._beacon.beacon_data}")
+                    logger.warning(f"could not get X-Plane version from {self._beacon.beacon}")
             else:
                 logger.info("XPlane UDP beacon is not connected")
         else:
