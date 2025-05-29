@@ -28,6 +28,7 @@ from simple_websocket import Client, ConnectionClosed
 
 from cockpitdecks_xp import __version__
 from cockpitdecks import CONFIG_KW, ENVIRON_KW, SPAM_LEVEL, DEPRECATION_LEVEL, MONITOR_RESOURCE_USAGE, RESOURCES_FOLDER, OBSERVABLES_FILE, yaml
+from cockpitdecks.variable import Variable
 from cockpitdecks.strvar import StringWithVariables, Formula
 from cockpitdecks.instruction import MacroInstruction
 
@@ -36,9 +37,10 @@ from cockpitdecks.simulator import SimulatorVariable, SimulatorVariableListener
 from cockpitdecks.resources.intvariables import COCKPITDECKS_INTVAR
 from cockpitdecks.observable import Observables, Observable
 from cockpitdecks.cockpit import CockpitInstruction
+
 # from ..resources.beacon import XPlaneBeacon, BEACON_DATA_KW
 from xpwebapi import beacon as XPlaneBeacon
-from xpwebapi.api import DatarefMeta, CommandMeta
+from xpwebapi.api import DatarefMeta, CommandMeta, Dataref as DatarefAPI, Command as CommandAPI
 from xpwebapi.ws import XPWebsocketAPI
 from ..resources.daytimeobs import DaytimeObservable
 
@@ -109,50 +111,9 @@ PERMANENT_SIMULATOR_EVENTS = {}  #
 BLACK_LIST = [ZULU_TIME_SEC, "sim/flightmodel/position/latitude", "sim/flightmodel/position/longitude"]
 
 
-# #############################################
-# REST OBJECTS
-#
-# REST API model keywords
-class REST_KW(Enum):
-    COMMANDS = "commands"
-    DATA = "data"
-    DATAREFS = "datarefs"
-    DESCRIPTION = "description"
-    DURATION = "duration"
-    IDENT = "id"
-    INDEX = "index"
-    ISACTIVE = "is_active"
-    ISWRITABLE = "is_writable"
-    NAME = "name"
-    PARAMS = "params"
-    REQID = "req_id"
-    RESULT = "result"
-    SUCCESS = "success"
-    TYPE = "type"
-    VALUE = "value"
-    VALUE_TYPE = "value_type"
-
-
-# DATAREF VALUE TYPES
-class DATAREF_DATATYPE(Enum):
-    INTEGER = "int"
-    FLOAT = "float"
-    DOUBLE = "double"
-    INTARRAY = "int_array"
-    FLOATARRAY = "float_array"
-    DATA = "data"
-
-
-# WEB API RETURN CODES
-class REST_RESPONSE(Enum):
-    RESULT = "result"
-    COMMAND_ACTIVE = "command_update_is_active"
-    DATAREF_UPDATE = "dataref_update_values"
-
-
 # A value in X-Plane Simulator
 #
-class Dataref(SimulatorVariable):
+class Dataref(SimulatorVariable, DatarefAPI):
     """
     A Dataref is an internal value of the simulation software made accessible to outside modules,
     plugins, or other software in general.
@@ -161,192 +122,10 @@ class Dataref(SimulatorVariable):
     def __init__(self, path: str, simulator: XPlane, is_string: bool = False):
         # Data
         SimulatorVariable.__init__(self, name=path, simulator=simulator, data_type="string" if is_string else "float")
-        self._monitored = 0
-
-        # path with array index sim/some/values[4]
-        self.path = path
-        self.index = None  # sign is it not a selected array element
-        if "[" in path:
-            self.path = self.name[: self.name.find("[")]  # sim/some/values
-            self.index = int(self.name[self.name.find("[") + 1 : self.name.find("]")])  # 4
-
-    def __str__(self) -> str:
-        if self.index is not None:
-            return f"{self.path}[{self.index}]={self.value}"
-        else:
-            return f"{self.path}={self.value}"
-
-    @property
-    def meta(self) -> DatarefMeta | None:
-        r = self.simulator.all_datarefs.get(self.path) if self.simulator.all_datarefs is not None else None
-        if r is None:
-            if self.simulator._can_complain:
-                logger.error(f"dataref {self.path} has no api meta data")
-        return r
-
-    @property
-    def valid(self) -> bool:
-        return self.meta is not None
-
-    @property
-    def ident(self) -> int | None:
-        if not self.valid:
-            logger.error(f"dataref {self.path} not valid")
-            return None
-        return self.meta.ident
-
-    @property
-    def value_type(self) -> str | None:
-        if not self.valid:
-            logger.error(f"dataref {self.path} not valid")
-            return None
-        return self.meta.value_type
-
-    @property
-    def is_writable(self) -> bool:
-        if not self.valid:
-            logger.error(f"dataref {self.path} not valid")
-            return False
-        return self.meta.is_writable
-
-    @property
-    def is_array(self) -> bool:
-        if not self.valid:
-            logger.error(f"dataref {self.path} not valid")
-            return False
-        return self.value_type in [DATAREF_DATATYPE.INTARRAY.value, DATAREF_DATATYPE.FLOATARRAY.value]
-
-    @property
-    def selected_indices(self) -> bool:
-        if not self.valid:
-            logger.error(f"dataref {self.path} not valid")
-            return False
-        return len(self.meta.indices) > 0
-
-    @property
-    def use_rest(self):
-        return USE_REST and (hasattr(self.simulator, "same_host") and not self.simulator.same_host())
-
-    @property
-    def rest_value(self):
-        if not self.valid:
-            if self.simulator._can_complain:
-                logger.error(f"dataref {self.path} not valid")
-            return False
-        url = f"{self.simulator.rest_url}/datarefs/{self.ident}/value"
-        response = requests.get(url)
-        if response.status_code == 200:
-            respjson = response.json()
-            webapi_logger.info(f"GET {self.path}: {url} = {respjson}")
-            if REST_KW.DATA.value in respjson and type(respjson[REST_KW.DATA.value]) in [bytes, str]:
-                return base64.b64decode(respjson[REST_KW.DATA.value]).decode("ascii").replace("\u0000", "")
-            return respjson[REST_KW.DATA.value]
-        webapi_logger.info(f"ERROR {self.path}: {response} {response.reason} {response.text}")
-        logger.error(f"rest_value: {response} {response.reason} {response.text}")
-        return None
-
-    @property
-    def is_monitored(self):
-        return self._monitored > 0
-
-    @property
-    def monitored_count(self) -> int:
-        return self._monitored
-
-    def inc_monitor(self):
-        self._monitored = self._monitored + 1
-
-    def dec_monitor(self) -> bool:
-        # IF returns False, no longer monitored
-        if self._monitored > 0:
-            self._monitored = self._monitored - 1
-        else:
-            logger.warning(f"{self.name} currently not monitored")
-        return self._monitored > 0
-
-    def rest_write(self) -> bool:
-        if not self.valid:
-            logger.error(f"dataref {self.path} not valid")
-            return False
-        if not self.is_writable:
-            logger.warning(f"dataref {self.path} is not writable")
-            return False
-        value = self.value
-        if self.value_type == DATAREF_DATATYPE.DATA.value:
-            # Encode string
-            value = str(value).encode("ascii")
-            value = base64.b64encode(value).decode("ascii")
-        payload = {REST_KW.DATA.value: value}
-        url = f"{self.simulator.rest_url}/datarefs/{self.ident}/value"
-        if self.index is not None and self.value_type in [DATAREF_DATATYPE.INTARRAY.value, DATAREF_DATATYPE.FLOATARRAY.value]:
-            # Update just one element of the array
-            url = url + f"?index={self.index}"
-        webapi_logger.info(f"PATCH {self.path}: {url}, {payload}")
-        response = requests.patch(url, json=payload)
-        if response.status_code == 200:
-            data = response.json()
-            logger.debug(f"result: {data}")
-            return True
-        webapi_logger.info(f"ERROR {self.path}: {response} {response.reason} {response.text}")
-        logger.error(f"write: {response} {response.reason} {response.text}")
-        return False
-
-    def ws_write(self) -> int:
-        return self.simulator.set_dataref_value(self.name, self.value)
-
-    def _write(self) -> bool:
-        return self.rest_write() if self.use_rest else (self.ws_write() != -1)
-
-    def save(self) -> bool:
-        if not self.valid:
-            logger.error(f"dataref {self.path} not valid")
-            return False
-        return self._write()
-
-    def parse_raw_value(self, raw_value):
-        if not self.valid:
-            logger.error(f"dataref {self.path} not valid")
-            return None
-
-        if self.value_type in [DATAREF_DATATYPE.INTARRAY.value, DATAREF_DATATYPE.FLOATARRAY.value]:
-            # 1. Arrays
-            # 1.1 Whole array
-            if type(raw_value) is not list:
-                logger.warning(f"dataref array {self.name}: value: is not a list ({value}, {type(value)})")
-                return None
-
-            if len(self.meta.indices) == 0:
-                logger.debug(f"dataref array {self.name}: no index, returning whole array")
-                return raw_value
-
-            # 1.2 Single array element
-            if len(raw_value) != len(self.meta.indices):
-                logger.warning(f"dataref array {self.name} size mismatch ({len(raw_value)}/{len(self.meta.indices)})")
-                logger.warning(f"dataref array {self.name}: value: {raw_value}, indices: {self.meta.indices})")
-                return None
-
-            idx = self.meta.indices.index(self.index)
-            if idx == -1:
-                logger.warning(f"dataref index {self.index} not found in {self.meta.indices}")
-                return None
-
-            logger.debug(f"dataref array {self.name}: returning {self.name}[{idx}]={raw_value[idx]}")
-            return raw_value[idx]
-
-        else:
-            # 2. Scalar values
-            # 2.1  String
-            if self.value_type == "data" and type(raw_value) in [bytes, str]:
-                return base64.b64decode(raw_value).decode("ascii").replace("\u0000", "")
-
-            # 2.1  Number (in python, float is double precision)
-            elif type(raw_value) not in [int, float]:
-                logger.warning(f"unknown value type for {self.name}: {type(raw_value)}, {raw_value}, expected {self.value_type}")
-
-        return raw_value
+        DatarefAPI.__init__(self, path=path, api=simulator)
 
 
-# Events from simulator
+# An events from X-Plane Simulator
 #
 class DatarefEvent(SimulatorEvent):
     """Dataref Update Event
@@ -396,17 +175,11 @@ class DatarefEvent(SimulatorEvent):
 # #############################################
 # Instructions
 #
-# The following command keywords are not executed, ignored with a warning
-NOT_A_COMMAND = [
-    "none",
-    "noop",
-    "nooperation",
-    "nocommand",
-    "donothing",
-]  # all forced to lower cases, -/:_ removed
-
-
 # An instruction in X-Plane Simulator
+# There are 3 types of instructions:
+# - Instruction to execute a command
+# - Instruction to execute a begin command followed by an end command
+# - Instruction to change the value of a sataref ("write" the value in the simulator)
 #
 class XPlaneInstruction(SimulatorInstruction, ABC):
     """An Instruction sent to the XPlane Simulator to execute some action.
@@ -416,38 +189,6 @@ class XPlaneInstruction(SimulatorInstruction, ABC):
 
     def __init__(self, name: str, simulator: XPlane, delay: float = 0.0, condition: str | None = None, button: "Button" = None) -> None:
         SimulatorInstruction.__init__(self, name=name, simulator=simulator, delay=delay, condition=condition)
-
-    @property
-    def meta(self) -> CommandMeta | None:
-        r = self.simulator.all_commands.get(self.path) if self.simulator.all_commands is not None else None
-        if r is None:
-            logger.error(f"command {self.path} has no api meta data")
-        return r
-
-    @property
-    def valid(self) -> bool:
-        return self.meta is not None
-
-    @property
-    def ident(self) -> int | None:
-        if not self.valid:
-            logger.error(f"command {self.path} not valid")
-            return None
-        return self.meta.ident
-
-    @property
-    def description(self) -> str | None:
-        if not self.valid:
-            return None
-        return self.meta.description
-
-    @property
-    def use_rest(self):
-        return USE_REST and (hasattr(self.simulator, "same_host") and not self.simulator.same_host())
-
-    @property
-    def is_no_operation(self) -> bool:
-        return self.path is not None and self.path.lower().replace("-", "") in NOT_A_COMMAND
 
     @classmethod
     def new(cls, name: str, simulator: XPlane, instruction_block: dict | list | tuple) -> XPlaneInstruction | None:
@@ -612,58 +353,41 @@ class XPlaneInstruction(SimulatorInstruction, ABC):
         logger.warning(f"could not find instruction in {instruction_block}")
         return None
 
-    @abstractmethod
-    def rest_execute(self) -> bool:  # ABC
-        return False
-
-    @abstractmethod
-    def ws_execute(self) -> int:  # ABC
-        return -1
-
-    def _execute(self):
-        if self.use_rest:
-            self.rest_execute()
-        else:
-            self.ws_execute()
-
 
 # Instructions to simulator
 #
-class Command(XPlaneInstruction):
+class Command(CommandAPI, XPlaneInstruction):
     """
     X-Plane simple Command, executed by CommandOnce API.
     """
 
+    # The following command keywords are not executed, ignored with a warning
+    NOT_A_COMMAND = [
+        "none",
+        "noop",
+        "nooperation",
+        "nocommand",
+        "donothing",
+    ]  # all forced to lower cases, -/:_ removed
+
     def __init__(self, simulator: XPlane, path: str, name: str | None = None, delay: float = 0.0, condition: str | None = None):
         XPlaneInstruction.__init__(self, name=name if name is not None else path, simulator=simulator, delay=delay, condition=condition)
+        CommandAPI.__init__(self, path=path, api=simulator)
         self.path = path  # some/command
 
     def __str__(self) -> str:
         return f"{self.name} ({self.path})"
 
+    @property
+    def is_no_operation(self) -> bool:
+        return self.path is not None and self.path.lower().replace("-", "") in Command.NOT_A_COMMAND
+
     def is_valid(self) -> bool:
-        return not self.is_no_operation
+        return super().is_vamie and not self.is_no_operation
 
-    def rest_execute(self) -> bool:
-        if not self.is_valid():
-            logger.error(f"command {self.path} is not an operation")
-            return False
-        if not self.valid:
-            logger.error(f"command {self.path} is not valid")
-            return False
-        payload = {REST_KW.IDENT.value: self.ident, REST_KW.DURATION.value: 0.0}
-        url = f"{self.simulator.rest_url}/command/{self.ident}/activate"
-        response = requests.post(url, json=payload)
-        webapi_logger.info(f"POST {url} {payload} {response}")
-        data = response.json()
-        if response.status_code == 200:
-            logger.debug(f"result: {data}")
-            return True
-        logger.error(f"execute: {response}, {data}")
-        return False
-
-    def ws_execute(self) -> int:
-        return self.simulator.set_command_is_active_with_duration(path=self.path)
+    def _execute(self) -> bool:
+        """Submit execution to API"""
+        return CommandAPI.execute(self)
 
 
 class BeginEndCommand(Command):
@@ -671,31 +395,12 @@ class BeginEndCommand(Command):
     X-Plane long command, executed between CommandBegin/CommandEnd API.
     """
 
-    DURATION = 5
-
     def __init__(self, simulator: XPlane, path: str, name: str | None = None, delay: float = 0.0, condition: str | None = None):
         Command.__init__(self, simulator=simulator, path=path, name=name, delay=0.0, condition=condition)  # force no delay for commandBegin/End
         self.is_on = False
 
-    def rest_execute(self) -> bool:
-        if not self.is_valid():
-            logger.error(f"command {self.path} is not an operation")
-            return False
-        if not self.valid:
-            logger.error(f"command {self.path} is not valid")
-            return False
-        payload = {REST_KW.IDENT.value: self.ident, REST_KW.DURATION.value: self.DURATION}
-        url = f"{self.simulator.rest_url}/command/{self.ident}/activate"
-        response = requests.post(url, json=payload)
-        webapi_logger.info(f"POST {url} {payload} {response}")
-        data = response.json()
-        if response.status_code == 200:
-            logger.debug(f"result: {data}")
-            return True
-        logger.error(f"execute: {response}, {data}")
-        return False
-
-    def ws_execute(self) -> int:
+    def _execute(self) -> bool:
+        """Execute command through API supplied at creation"""
         if not self.is_valid:
             logger.error(f"command {self.path} not found")
             return -1
@@ -724,7 +429,10 @@ class SetDataref(XPlaneInstruction):
 
         # 1. Variable to set
         self.path = path  # some/dataref/to/set
-        self._variable = simulator.get_variable(path)
+        if Dataref.is_internal_variable(path):
+            self._variable = simulator.cockpit.get_variable(path, factory=simulator.cockpit)
+        else:
+            self._variable = simulator.get_variable(path)
 
         # 2. Value to set
         # Case 1: Generic, non computed static fixed value
@@ -765,43 +473,17 @@ class SetDataref(XPlaneInstruction):
 
     @property
     def valid(self) -> bool:
-        return self._variable.valid if isinstance(self._variable, Dataref) else True
+        return isinstance(self._variable, Variable)
 
-    def rest_execute(self) -> bool:
+    def _execute(self) -> bool:
+        """Execute command through API supplied at creation"""
         if not self.valid:
-            logger.error(f"set-dataref: dataref {self._variable.name} is not valid")
+            logger.error(f"set dataref command is invalid ({self.path})")
             return False
-        value = self.value
-        if self.value_type == "data":
-            value = str(value).encode("ascii")
-            value = base64.b64encode(value).decode("ascii")
-        ident = self._variable.ident
-        payload = {REST_KW.DATA.value: self.value}
-        url = f"{self.simulator.rest_url}/datarefs/{ident}/value"
-        response = requests.patch(url, json=payload)
-        webapi_logger.info(f"PATCH {url} {payload} {response}")
-        if response.status_code == 200:
-            return True
-        if response.status_code == 403:
-            logger.warning(f"{self._variable.name}: dataref not writable")
-            return False
-        logger.error(f"execute: {response}")
-        return False
-
-    def ws_execute(self) -> int:
-        if not self.valid:
-            logger.error(f"set-dataref: dataref {self._variable.name} is not valid")
-            return -1
-        return self.simulator.set_dataref_value(path=self.path, value=self.value)
-
-    def _execute(self):
+        self._variable.value = self.value
         if isinstance(self._variable, Dataref):
-            logger.debug(f"{self.name}: updating {self._variable.name}..")
-            super()._execute()
-            logger.debug(f"{self.name}: ..updated")
-        else:
-            self._variable.update_value(new_value=self.value, cascade=True)
-            logger.debug(f"{self.name}: updated variable {self._variable.name} to {self.value}")
+            return self._variable.write()
+        return True
 
 
 # Events from simulator
@@ -860,6 +542,7 @@ class CommandActiveEvent(SimulatorEvent):
             logger.debug("enqueued")
         return True
 
+
 # Connector to X-Plane status (COCKPITDECKS_INTVAR.INTDREF_CONNECTION_STATUS)
 # 0 = Connection monitor to X-Plane is not running
 # 1 = Connection monitor to X-Plane running, not connected to websocket
@@ -875,6 +558,20 @@ class XPlane(Simulator, SimulatorVariableListener, XPWebsocketAPI):
     """
     Get data from XPlane via network.
     Use a class to implement RAI Pattern for the UDP socket.
+
+    Same attribute in both Simulator and XPWebsocketAPI
+    # logger.debug(list(set(dir(Simulator)) & set(dir(XPWebsocketAPI))))
+
+        execute
+            Simulator.execute(Instruction)
+            XPWebsocketAPI.execute(Command, duration)
+
+        start
+            Simulator.start -> abstract -> XPlane.start overrides
+            XPWebsocketAPI.start -> start ws_receiver
+
+            XPlane.start calls XPWebsocketAPI.start (i.e. "shadows" it)
+
     """
 
     name = "X-Plane"
@@ -911,7 +608,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPWebsocketAPI):
         self.ws_thread: threading.Thread | None = None
 
         Simulator.__init__(self, cockpit=cockpit, environ=environ)
-        XPWebsocketAPI.__init__(self, host=self.api_host[0], port=self.api_host[1], api=self.api_path, api_version=self.api_version)
+        XPWebsocketAPI.__init__(self, host=self.api_host[0], port=self.api_host[1], api=self.api_path, api_version=self.api_version, use_rest=USE_REST)
         SimulatorVariableListener.__init__(self, name=self.name)
         self.cockpit.set_logging_level(__name__)
 
@@ -951,6 +648,8 @@ class XPlane(Simulator, SimulatorVariableListener, XPWebsocketAPI):
     #
     def variable_factory(self, name: str, is_string: bool = False, creator: str = None) -> Dataref:
         # logger.debug(f"creating xplane dataref {name}")
+        if Dataref.is_internal_variable(name):
+            logger.warning(f"request to create internal variable {name}")
         variable = Dataref(path=name, simulator=self, is_string=is_string)
         self.set_rounding(variable)
         self.set_frequency(variable)
@@ -1080,47 +779,47 @@ class XPlane(Simulator, SimulatorVariableListener, XPWebsocketAPI):
     #
     # Instruction execution
     #
-    def execute_command(self, command: Command | None):
-        self.command_once(command)
+    # def execute_command(self, command: Command | None):
+    #     self.command_once(command)
 
-    def command_once(self, command: Command):
-        if not command.is_valid():
-            logger.warning(f"command '{command}' not sent (command placeholder, no command, do nothing)")
-            return
-        if not self.connected:
-            logger.warning(f"no connection ({command})")
-            return
-        if command.path is not None:
-            self.set_command_is_active_with_duration(path=command.path)
-            logger.log(SPAM_LEVEL, f"executed {command}")
-        else:
-            logger.warning("no command to execute")
+    # def command_once(self, command: Command):
+    #     if not command.is_valid():
+    #         logger.warning(f"command '{command}' not sent (command placeholder, no command, do nothing)")
+    #         return
+    #     if not self.connected:
+    #         logger.warning(f"no connection ({command})")
+    #         return
+    #     if command.path is not None:
+    #         self.set_command_is_active_with_duration(path=command.path)
+    #         logger.log(SPAM_LEVEL, f"executed {command}")
+    #     else:
+    #         logger.warning("no command to execute")
 
-    def command_begin(self, command: Command):
-        if not command.is_valid():
-            logger.warning(f"command '{command}' not sent (command placeholder, no command, do nothing)")
-            return
-        if not self.connected:
-            logger.warning(f"no connection ({command})")
-            return
-        if command.path is not None:
-            self.set_command_is_active_true_without_duration(path=command.path)
-            logger.log(SPAM_LEVEL, f"executing {command}..")
-        else:
-            logger.warning("no command to execute")
+    # def command_begin(self, command: Command):
+    #     if not command.is_valid():
+    #         logger.warning(f"command '{command}' not sent (command placeholder, no command, do nothing)")
+    #         return
+    #     if not self.connected:
+    #         logger.warning(f"no connection ({command})")
+    #         return
+    #     if command.path is not None:
+    #         self.set_command_is_active_true_without_duration(path=command.path)
+    #         logger.log(SPAM_LEVEL, f"executing {command}..")
+    #     else:
+    #         logger.warning("no command to execute")
 
-    def command_end(self, command: Command):
-        if not command.is_valid():
-            logger.warning(f"command '{command}' not sent (command placeholder, no command, do nothing)")
-            return
-        if not self.connected:
-            logger.warning(f"no connection ({command})")
-            return
-        if command.path is not None:
-            self.set_command_is_active_false_without_duration(path=command.path)
-            logger.log(SPAM_LEVEL, f"..executed {command}")
-        else:
-            logger.warning("no command to execute")
+    # def command_end(self, command: Command):
+    #     if not command.is_valid():
+    #         logger.warning(f"command '{command}' not sent (command placeholder, no command, do nothing)")
+    #         return
+    #     if not self.connected:
+    #         logger.warning(f"no connection ({command})")
+    #         return
+    #     if command.path is not None:
+    #         self.set_command_is_active_false_without_duration(path=command.path)
+    #         logger.log(SPAM_LEVEL, f"..executed {command}")
+    #     else:
+    #         logger.warning("no command to execute")
 
     #
     # Variable management
@@ -1426,6 +1125,19 @@ class XPlane(Simulator, SimulatorVariableListener, XPWebsocketAPI):
         e = CommandActiveEvent(sim=self, command=command, is_active=active, cascade=True)
         self.inc(COCKPITDECKS_INTVAR.COMMAND_ACTIVE_ENQUEUED.value)
 
+    # def execute(self, command: CommandAPI, duration: float = 0.0):
+    #     """Overrides Simulator.execute
+
+    #     XPlane.execute needs to call XPWebsocketAPI.execute, not Simulator.execute.
+    #     This sloppy override works.
+    #     (Will refactor to rename Simulator.execute into Simulator.execute_instruction)
+
+    #     Args:
+    #         command (CommandAPI): [description]
+    #         duration (float): [description] (default: `0.0`)
+    #     """
+    #     XPWebsocketAPI.execute(self, command=command, duration=duration)
+
     @property
     def is_valid(self) -> bool:
         """is_valid if aircraft datarefs are available"""
@@ -1444,7 +1156,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPWebsocketAPI):
 
     @property
     def aircraft_loaded(self) -> bool:
-        a = self._aircraft_path.rest_value
+        a = self.dataref_value(dataref=self._aircraft_path)
         ret = a is not None and a != ""
         # logger.info(f"{self.name}: aircraft loaded ({a})" if ret else "no aircraft")
         return ret
@@ -1456,7 +1168,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPWebsocketAPI):
          - X-Plane version before 12.1.4,
          - X-Plane is not running
         """
-        return super(XPWebsocketAPI, self).connected
+        return super(XPWebsocketAPI, self).connected  # XPWebsocketAPI.connected(self)
 
     def beacon_callback(self, connected: bool):
         if connected:
@@ -1464,6 +1176,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPWebsocketAPI):
             if self._beacon.connected:
                 self.dynamic_timeout = 0.5  # seconds
                 same_host = self._beacon.same_host()
+                self.use_rest = USE_REST and not same_host
                 new_host = "127.0.0.1"
                 new_port = DEFAULT_TCP_PORT
                 if not same_host:
@@ -1471,7 +1184,7 @@ class XPlane(Simulator, SimulatorVariableListener, XPWebsocketAPI):
                     new_port = REMOTE_TCP_PORT
                 xp_version = self._beacon.data.xplane_version
                 if xp_version is not None:
-                    use_rest = ", use REST" if USE_REST and not same_host else ""
+                    use_rest = ", use REST" if self.use_rest else ""
                     new_apiversion = "/v1"
                     if xp_version >= XP_MIN_VERSION:
                         new_apiversion = "/v2"
@@ -1524,7 +1237,6 @@ class XPlane(Simulator, SimulatorVariableListener, XPWebsocketAPI):
         self._can_complain = True
         logger.info(f"{self.name}: ..aircraft loaded")
 
-
     # ################################
     # Interface
     #
@@ -1547,6 +1259,8 @@ class XPlane(Simulator, SimulatorVariableListener, XPWebsocketAPI):
             logger.warning("not connected. cannot not start.")
             return
 
+        # Starts web socket listener
+        # super().start()
         if self.ws_event.is_set():  # Thread for X-Plane datarefs
             self.ws_event.clear()
             self.ws_thread = threading.Thread(target=self.ws_receiver, name="XPlane::WebSocket Listener")
@@ -1622,37 +1336,37 @@ class XPlane(Simulator, SimulatorVariableListener, XPWebsocketAPI):
 #
 # Simulatior Information Structure
 #
-PERMANENT_SIMULATION_VARIABLE_NAMES = set()
+# PERMANENT_SIMULATION_VARIABLE_NAMES = set()
 
 
-class Simulation(SimulatorVariableListener):
-    """Information container for some variables
-    Variables are filled if available, which is not always the case...
-    """
+# class Simulation(SimulatorVariableListener):
+#     """Information container for some variables
+#     Variables are filled if available, which is not always the case...
+#     """
 
-    def __init__(self, owner) -> None:
-        SimulatorVariableListener.__init__(self, name=type(self).__name__)
-        self.owner = owner
-        self._permanent_variable_names = PERMANENT_SIMULATION_VARIABLE_NAMES
-        self._permanent_variables = {}
+#     def __init__(self, owner) -> None:
+#         SimulatorVariableListener.__init__(self, name=type(self).__name__)
+#         self.owner = owner
+#         self._permanent_variable_names = PERMANENT_SIMULATION_VARIABLE_NAMES
+#         self._permanent_variables = {}
 
-    def init(self):
-        for v in self._permanent_variable_names:
-            intvar = self.owner.get_variable(name=SimulatorVariable.internal_variable_name(v), factory=self)
-            intvar.add_listener(self)
-            self._permanent_variables[v] = intvar
-        logger.info(f"permanent variables: {', '.join([SimulatorVariable.internal_variable_root_name(v) for v in self._permanent_variables.keys()])}")
+#     def init(self):
+#         for v in self._permanent_variable_names:
+#             intvar = self.owner.get_variable(name=SimulatorVariable.internal_variable_name(v), factory=self)
+#             intvar.add_listener(self)
+#             self._permanent_variables[v] = intvar
+#         logger.info(f"permanent variables: {', '.join([SimulatorVariable.internal_variable_root_name(v) for v in self._permanent_variables.keys()])}")
 
-    def simulator_variable_changed(self, data: SimulatorVariable):
-        """
-        This gets called when dataref AIRCRAFT_CHANGE_MONITORING_DATAREF is changed, hence a new aircraft has been loaded.
-        """
-        name = data.name
-        if SimulatorVariable.is_internal_variable(name):
-            name = SimulatorVariable.internal_variable_root_name(name)
-        if name not in self._permanent_variables:
-            logger.warning(f"{data.name}({type(data)})={data.value} unhandled")
-            return
+#     def simulator_variable_changed(self, data: SimulatorVariable):
+#         """
+#         This gets called when dataref AIRCRAFT_CHANGE_MONITORING_DATAREF is changed, hence a new aircraft has been loaded.
+#         """
+#         name = data.name
+#         if SimulatorVariable.is_internal_variable(name):
+#             name = SimulatorVariable.internal_variable_root_name(name)
+#         if name not in self._permanent_variables:
+#             logger.warning(f"{data.name}({type(data)})={data.value} unhandled")
+#             return
 
 
-#
+# #
