@@ -39,7 +39,7 @@ from cockpitdecks.observable import Observables, Observable
 from cockpitdecks.cockpit import CockpitInstruction
 
 # from ..resources.beacon import XPlaneBeacon, BEACON_DATA_KW
-from xpwebapi import beacon as XPlaneBeacon
+from xpwebapi import beacon as XPlaneBeacon, BeaconData
 from xpwebapi.api import DatarefMeta, CommandMeta, Dataref as DatarefAPI, Command as CommandAPI
 from xpwebapi.ws import XPWebsocketAPI
 from ..resources.daytimeobs import DaytimeObservable
@@ -1111,7 +1111,7 @@ class XPlane(XPWebsocketAPI, Simulator, SimulatorVariableListener):
         logger.log(SPAM_LEVEL, f">>>>> add_all_simulator_events_to_monitor: added {paths}")
 
     # ################################
-    # Cockpit interface
+    # Websocket API interface
     #
     def dataref_newvalue_callback(self, dataref: str, value):
         cascade = dataref in self.simulator_variable_to_monitor
@@ -1123,19 +1123,6 @@ class XPlane(XPWebsocketAPI, Simulator, SimulatorVariableListener):
         # print(f"CMD  {command}={active}")
         e = CommandActiveEvent(sim=self, command=command, is_active=active, cascade=True)
         self.inc(COCKPITDECKS_INTVAR.COMMAND_ACTIVE_ENQUEUED.value)
-
-    # def execute(self, command: CommandAPI, duration: float = 0.0):
-    #     """Overrides Simulator.execute
-
-    #     XPlane.execute needs to call XPWebsocketAPI.execute, not Simulator.execute.
-    #     This sloppy override works.
-    #     (Will refactor to rename Simulator.execute into Simulator.execute_instruction)
-
-    #     Args:
-    #         command (CommandAPI): [description]
-    #         duration (float): [description] (default: `0.0`)
-    #     """
-    #     XPWebsocketAPI.execute(self, command=command, duration=duration)
 
     @property
     def is_valid(self) -> bool:
@@ -1167,14 +1154,13 @@ class XPlane(XPWebsocketAPI, Simulator, SimulatorVariableListener):
          - X-Plane version before 12.1.4,
          - X-Plane is not running
         """
-        return super(XPWebsocketAPI, self).connected  # XPWebsocketAPI.connected(self)
+        return XPWebsocketAPI.connected(self)
 
-    def beacon_callback(self, connected: bool):
+    def beacon_callback(self, connected: bool, beacon_data: BeaconData, same_host: bool):
         if connected:
             logger.info("X-Plane beacon connected")
             if self._beacon.connected:
                 self.dynamic_timeout = 0.5  # seconds
-                same_host = self._beacon.same_host()
                 self.use_rest = USE_REST and not same_host
                 new_host = "127.0.0.1"
                 new_port = DEFAULT_TCP_PORT
@@ -1187,7 +1173,7 @@ class XPlane(XPWebsocketAPI, Simulator, SimulatorVariableListener):
                     new_apiversion = "/v1"
                     if xp_version >= XP_MIN_VERSION:
                         new_apiversion = "/v2"
-                    elif xp_version < XP_SUPER_MIN_VERSION:
+                    elif xp_version < XP_MAX_VERSION:
                         new_apiversion = ""
                         logger.warning(f"could not set API version from {xp_version} ({self._beacon.data})")
                     if new_apiversion != "":
