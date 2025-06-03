@@ -554,7 +554,7 @@ class CommandActiveEvent(SimulatorEvent):
 # #############################################
 # SIMULATOR
 #
-class XPlane(Simulator, SimulatorVariableListener, XPWebsocketAPI):
+class XPlane(XPWebsocketAPI, Simulator, SimulatorVariableListener):
     """
     Get data from XPlane via network.
     Use a class to implement RAI Pattern for the UDP socket.
@@ -612,9 +612,8 @@ class XPlane(Simulator, SimulatorVariableListener, XPWebsocketAPI):
         SimulatorVariableListener.__init__(self, name=self.name)
         self.cockpit.set_logging_level(__name__)
 
-        self.ws_event = threading.Event()
-        self.ws_event.set()  # means it is off
-
+        self.on_start = self._on_start
+        self.on_stop = self._on_stop
         self.on_dataref_update = self.dataref_newvalue_callback
         self.on_command_active = self.command_active_callback
 
@@ -1240,6 +1239,21 @@ class XPlane(Simulator, SimulatorVariableListener, XPWebsocketAPI):
     # ################################
     # Interface
     #
+    def _on_start(self, connected: bool):
+        if not connected:
+            return
+        self.clean_simulator_variables_to_monitor()
+        self.add_all_simulator_variables_to_monitor()
+        self.clean_simulator_events_to_monitor()
+        self.add_all_simulator_events_to_monitor()
+        logger.info("request to reload pages")
+        self.cockpit.reload_pages()  # to request page variables and take into account updated values
+        # logger.info(f"{self.name} started")
+
+    def _on_stop(self, connected: bool):
+        if not connected:
+            return
+
     def connect(self, reload_cache: bool = False):
         """
         Starts connect loop.
@@ -1253,51 +1267,6 @@ class XPlane(Simulator, SimulatorVariableListener, XPWebsocketAPI):
         """
         super().disconnect()
         self._beacon.disconnect()
-
-    def start(self):
-        if not self.connected:
-            logger.warning("not connected. cannot not start.")
-            return
-
-        # Starts web socket listener
-        # super().start()
-        if self.ws_event.is_set():  # Thread for X-Plane datarefs
-            self.ws_event.clear()
-            self.ws_thread = threading.Thread(target=self.ws_receiver, name="XPlane::WebSocket Listener")
-            self.ws_thread.start()
-            logger.info("websocket listener started")
-        else:
-            logger.info("websocket listener already running.")
-
-        # When restarted after network failure, should clean all datarefs
-        # then reload datarefs from current page of each deck
-        self.reload_caches()
-        self.rebuild_dataref_ids()
-        self.clean_simulator_variables_to_monitor()
-        self.add_all_simulator_variables_to_monitor()
-        self.clean_simulator_events_to_monitor()
-        self.add_all_simulator_events_to_monitor()
-        logger.info("request to reload pages")
-        self.cockpit.reload_pages()  # to request page variables and take into account updated values
-        logger.info(f"{self.name} started")
-
-    def stop(self):
-        if not self.ws_event.is_set():
-            # if self.all_datarefs is not None:
-            #     self.all_datarefs.save("datarefs.json")
-            # if self.all_commands is not None:
-            #     self.all_commands.save("commands.json")
-            self.ws_event.set()
-            if self.ws_thread is not None and self.ws_thread.is_alive():
-                logger.debug("stopping websocket listener..")
-                wait = RECEIVE_TIMEOUT
-                logger.debug(f"..asked to stop websocket listener (this may last {wait} secs. for timeout)..")
-                self.ws_thread.join(wait)
-                if self.ws_thread.is_alive():
-                    logger.warning("..thread may hang in ws.receive()..")
-                logger.debug("..websocket listener stopped")
-        else:
-            logger.debug("websocket listener not running")
 
     def cleanup(self):
         """
