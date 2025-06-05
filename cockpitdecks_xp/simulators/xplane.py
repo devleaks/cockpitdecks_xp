@@ -13,8 +13,8 @@ import base64
 
 
 from abc import ABC, abstractmethod
-from typing import List
-from enum import Enum
+from typing import Callable, List
+from enum import Enum, IntEnum
 from datetime import datetime, timedelta
 
 # Packaging is used in Cockpit to check driver versions
@@ -40,7 +40,7 @@ from cockpitdecks.cockpit import CockpitInstruction
 
 # from ..resources.beacon import XPlaneBeacon, BEACON_DATA_KW
 from xpwebapi import beacon as XPlaneBeacon, BeaconData
-from xpwebapi.api import DatarefMeta, CommandMeta, Dataref as DatarefAPI, Command as CommandAPI
+from xpwebapi.api import Dataref as DatarefAPI, Command as CommandAPI
 from xpwebapi.ws import XPWebsocketAPI
 from ..resources.daytimeobs import DaytimeObservable
 
@@ -67,6 +67,7 @@ if WEBAPILOGFILE is not None:
 # UDP sends at most ~40 to ~50 dataref values per packet.
 RECONNECT_TIMEOUT = 10  # seconds, times between attempts to reconnect to X-Plane when not connected (except on initial startup, see dynamic_timeout)
 RECEIVE_TIMEOUT = 5  # seconds, assumes no awser if no message recevied withing that timeout
+WAIT_FOR_RESOURCE_TIMEOUT = 5
 
 DEFAULT_TCP_PORT = 8086
 REMOTE_TCP_PORT = 8080  # when adressing remote host, this is the port number of the **proxy** to X-Plane standard :8086 port
@@ -551,6 +552,17 @@ class CommandActiveEvent(SimulatorEvent):
 # 4 = WS receiver has received data from simulator
 
 
+# X-Plane Status
+class XPLANE_STATUS(IntEnum):
+    NO_SIMULATOR = 0
+    REACHABLE = 1
+    CONNECTED = 2
+    HAS_META_DATA = 3
+    RECEIVING_DATA = 4
+    AIRCRAFT_LOADED = 5  # i.e; Has all meta data
+    MAIN_MENU = 9
+
+
 # #############################################
 # SIMULATOR
 #
@@ -572,6 +584,11 @@ class XPlane(XPWebsocketAPI, Simulator, SimulatorVariableListener):
 
             XPlane.start calls XPWebsocketAPI.start (i.e. "shadows" it)
 
+        First attribute found is used, so ORDER OR PARENT CLASSES IS IMPORTANT:
+        1. XPWebsocketAPI
+        2. Simulator
+        3. SimulatorVariableListener
+
     """
 
     name = "X-Plane"
@@ -579,16 +596,16 @@ class XPlane(XPWebsocketAPI, Simulator, SimulatorVariableListener):
 
     def __init__(self, cockpit, environ):
         self._inited = False
+        self._xplane_status = XPLANE_STATUS.MAIN_MENU  # dummy
+        self.xplane_status = XPLANE_STATUS.NO_SIMULATOR  # real init with feedback
 
-        self._beacon = XPlaneBeacon()
-        self._beacon.set_callback(self.beacon_callback)
-        self.dynamic_timeout = RECONNECT_TIMEOUT
+        # X-Plane class internals
+        #
         self._running_time = Dataref(path=RUNNING_TIME, simulator=self)  # cheating, side effect, works for rest api only, do not force!
         self._aircraft_path = Dataref(path=AIRCRAFT_LOADED, simulator=self)
-        self._can_complain = False
 
-        self._wait_for_aircraft = threading.Event()
-        self._wait_for_aircraft.set()
+        self._wait_for_resource = threading.Event()
+        self._wait_for_resource.set()
 
         self._dataref_by_id = {}  # {dataref-id: Dataref}
         self._max_datarefs_monitored = 0  # max(len(self._dataref_by_id))
@@ -599,23 +616,30 @@ class XPlane(XPWebsocketAPI, Simulator, SimulatorVariableListener):
         self._permanent_observables: List[Observable] = []  # cannot create them now since XPlane does not exist yet (subclasses of Observable)
         self._observables: Observables | None = None  # local config observables for this simulator <sim>/resources/observables.yaml
 
+        Simulator.__init__(self, cockpit=cockpit, environ=environ)
+        self.cockpit.set_logging_level(__name__)
+
+        SimulatorVariableListener.__init__(self, name=self.name)
+
+        # Websocket
+        #
+        self._beacon = XPlaneBeacon()
+        self._beacon.set_callback(self.beacon_callback)
+        self.dynamic_timeout = RECONNECT_TIMEOUT
         self.xp_home = environ.get(ENVIRON_KW.SIMULATOR_HOME.value)
         self.api_host = environ.get(ENVIRON_KW.API_HOST.value, "127.0.0.1")
         self.api_port = environ.get(ENVIRON_KW.API_PORT.value, 8086)
         self.api_path = environ.get(ENVIRON_KW.API_PATH.value, "/api")
         self.api_version = environ.get(ENVIRON_KW.API_VERSION.value, "v1")
 
-        self.ws_thread: threading.Thread | None = None
-
-        Simulator.__init__(self, cockpit=cockpit, environ=environ)
         XPWebsocketAPI.__init__(self, host=self.api_host[0], port=self.api_host[1], api=self.api_path, api_version=self.api_version, use_rest=USE_REST)
-        SimulatorVariableListener.__init__(self, name=self.name)
-        self.cockpit.set_logging_level(__name__)
-
-        self.on_start = self._on_start
-        self.on_stop = self._on_stop
+        # XPWebsocketAPI callbacks
+        self.after_on_start = self._on_start
+        self.before_on_stop = self._on_stop
         self.on_dataref_update = self.dataref_newvalue_callback
         self.on_command_active = self.command_active_callback
+        self.on_open = self._on_ws_open
+        self.on_close = self._on_ws_close
 
         self.init()
 
@@ -628,10 +652,6 @@ class XPlane(XPWebsocketAPI, Simulator, SimulatorVariableListener):
         self._dataref_by_id = {}
         self.disconnect()
 
-    def is_night(self) -> bool:
-        obs = list(filter(lambda o: type(o) is DaytimeObservable, self.observables))
-        return obs[0].is_night() if len(obs) > 0 else False
-
     def init(self):
         if self._inited:
             return
@@ -641,6 +661,22 @@ class XPlane(XPWebsocketAPI, Simulator, SimulatorVariableListener):
 
     def get_version(self) -> list:
         return [f"{type(self).__name__} {__version__}"]
+
+    @property
+    def xplane_status(self) -> XPLANE_STATUS:
+        """Should use REST API for some purpose"""
+        return self._xplane_status
+
+    @property
+    def xplane_status_str(self) -> str:
+        """Should use REST API for some purpose"""
+        return f"{XPLANE_STATUS(self._xplane_status).name}"
+
+    @xplane_status.setter
+    def xplane_status(self, xplane_status: XPLANE_STATUS):
+        if self._xplane_status != xplane_status:
+            self._xplane_status = xplane_status
+            logger.info(f"X-Plane status is now {self.xplane_status_str}")
 
     # ################################
     # Factories
@@ -667,11 +703,18 @@ class XPlane(XPWebsocketAPI, Simulator, SimulatorVariableListener):
     # ################################
     # Others
     #
-    def same_host(self) -> bool:
-        return self._beacon.same_host() if self.connected else False
+    def is_night(self) -> bool:
+        obs = list(filter(lambda o: type(o) is DaytimeObservable, self.observables))
+        return obs[0].is_night() if len(obs) > 0 else False
 
     def datetime(self, zulu: bool = False, system: bool = False) -> datetime:
-        """Returns the simulator date and time"""
+        """Returns the *simulator* date and time of simulation
+
+        Args:
+        zulu (bool): Returns UTC time of simulation
+        system (bool); Returns system time rather than simulation time.
+
+        """
         if not self.cockpit.variable_database.exists(DATETIME_DATAREFS[0]):  # !! hack, means dref not created yet
             return super().datetime(zulu=zulu, system=system)
         now = datetime.now().astimezone()
@@ -682,16 +725,6 @@ class XPlane(XPWebsocketAPI, Simulator, SimulatorVariableListener):
             simnow = simnow + timedelta(days=days) + timedelta(days=secs)
             return simnow
         return now
-
-    def rebuild_dataref_ids(self):
-        if self.all_datarefs.has_data and len(self._dataref_by_id) > 0:
-            self._dataref_by_id = {d.ident: d for d in self._dataref_by_id.values()}
-            logger.info("dataref ids rebuilt")
-            return
-        logger.warning("no data to rebuild dataref ids")
-
-    def aircraft_changed(self):
-        self.reload_caches(force=True)
 
     # ################################
     # Observables
@@ -741,6 +774,10 @@ class XPlane(XPWebsocketAPI, Simulator, SimulatorVariableListener):
 
     #
     # Datarefs
+    def aircraft_changed(self):
+        """When notified that the aircraft has changed, we need to reload all datarefs and commands (since they all changed)"""
+        self.reload_caches(force=True)
+
     def get_variables(self) -> set:
         """Returns the list of datarefs for which cockpitdecks wants to be notified of changes."""
         ret = set(PERMANENT_SIMULATOR_VARIABLES)
@@ -752,16 +789,17 @@ class XPlane(XPWebsocketAPI, Simulator, SimulatorVariableListener):
         if len(cockpit_vars) > 0:
             ret = ret | cockpit_vars
         # Aircraft variables
-        aircraft_vars = self.cockpit.aircraft.get_variables()
-        if len(aircraft_vars) > 0:
-            ret = ret | aircraft_vars
+        if self.is_aircraft_loaded:
+            aircraft_vars = self.cockpit.aircraft.get_variables()
+            if len(aircraft_vars) > 0:
+                ret = ret | aircraft_vars
         return ret
 
     def simulator_variable_changed(self, data: SimulatorVariable):
         pass
 
-    #
     # Events
+    #
     def get_activities(self) -> set:
         """Returns the list of commands for which cockpitdecks wants to be notified of activation."""
         ret = set(PERMANENT_SIMULATOR_EVENTS)
@@ -771,57 +809,15 @@ class XPlane(XPWebsocketAPI, Simulator, SimulatorVariableListener):
         more = self.cockpit.get_activities()
         if len(more) > 0:
             ret = ret | more
+        # Aircraft variables
+        if self.is_aircraft_loaded:
+            more = self.cockpit.aircraft.get_activities()
+            if len(more) > 0:
+                ret = ret | more
         return ret
 
-    # ################################
-    # X-Plane Interface
-    #
-    # Instruction execution
-    #
-    # def execute_command(self, command: Command | None):
-    #     self.command_once(command)
-
-    # def command_once(self, command: Command):
-    #     if not command.is_valid():
-    #         logger.warning(f"command '{command}' not sent (command placeholder, no command, do nothing)")
-    #         return
-    #     if not self.connected:
-    #         logger.warning(f"no connection ({command})")
-    #         return
-    #     if command.path is not None:
-    #         self.set_command_is_active_with_duration(path=command.path)
-    #         logger.log(SPAM_LEVEL, f"executed {command}")
-    #     else:
-    #         logger.warning("no command to execute")
-
-    # def command_begin(self, command: Command):
-    #     if not command.is_valid():
-    #         logger.warning(f"command '{command}' not sent (command placeholder, no command, do nothing)")
-    #         return
-    #     if not self.connected:
-    #         logger.warning(f"no connection ({command})")
-    #         return
-    #     if command.path is not None:
-    #         self.set_command_is_active_true_without_duration(path=command.path)
-    #         logger.log(SPAM_LEVEL, f"executing {command}..")
-    #     else:
-    #         logger.warning("no command to execute")
-
-    # def command_end(self, command: Command):
-    #     if not command.is_valid():
-    #         logger.warning(f"command '{command}' not sent (command placeholder, no command, do nothing)")
-    #         return
-    #     if not self.connected:
-    #         logger.warning(f"no connection ({command})")
-    #         return
-    #     if command.path is not None:
-    #         self.set_command_is_active_false_without_duration(path=command.path)
-    #         logger.log(SPAM_LEVEL, f"..executed {command}")
-    #     else:
-    #         logger.warning("no command to execute")
-
-    #
     # Variable management
+    #
     def add_permanently_monitored_simulator_variables(self):
         """Add simulator variables coming from different sources (cockpit, simulator itself, etc.)
         that are always monitored (for all aircrafts)
@@ -1010,8 +1006,8 @@ class XPlane(XPWebsocketAPI, Simulator, SimulatorVariableListener):
         # self.remove_simulator_variable_to_monitor(datarefs)
         super().remove_all_simulator_variable()
 
-    #
     # Event management
+    #
     def add_permanently_monitored_simulator_events(self):
         # self.create_permanent_observables() should be called before
         # like in add_permanently_monitored_simulator_variables()
@@ -1110,9 +1106,85 @@ class XPlane(XPWebsocketAPI, Simulator, SimulatorVariableListener):
         self._max_events_monitored = max(self._max_events_monitored, len(self.cmdevents))
         logger.log(SPAM_LEVEL, f">>>>> add_all_simulator_events_to_monitor: added {paths}")
 
-    # ################################
     # Websocket API interface
     #
+    def beacon_callback(self, connected: bool, beacon_data: BeaconData, same_host: bool):
+        if connected:
+            logger.info("X-Plane beacon received")
+            self.dynamic_timeout = 0.5  # seconds
+            self.use_rest = USE_REST and not same_host
+            new_host = "127.0.0.1"
+            new_port = DEFAULT_TCP_PORT
+            if not same_host:
+                new_host = beacon_data.host
+                new_port = REMOTE_TCP_PORT
+            xp_version = beacon_data.xplane_version
+            if xp_version is not None:
+                use_rest_str = ", use REST" if self.use_rest else ""
+                new_apiversion = "/v1"
+                if xp_version >= XP_MIN_VERSION:
+                    new_apiversion = "/v2"
+                elif xp_version < XP_MAX_VERSION:
+                    new_apiversion = ""
+                    logger.warning(f"could not set API version from {xp_version} ({beacon_data})")
+                if new_apiversion != "" and (new_apiversion != self._api_version or new_host != self.host or new_port != self.new_port):
+                    network_changed = self.set_network(host=new_host, port=new_port, api="/api", api_version=new_apiversion)
+                    logger.info(f"XPlane API at {self.rest_url} from beacon data{use_rest_str}")
+                    if self.connected and network_changed:  # We need to stop/restart to take into account new network parameters
+                        logger.info("resetting connection..")
+                        self.reset_connection()
+                        logger.info("..connection reset")
+                else:
+                    logger.warning("no API version, no change")
+            else:
+                logger.warning(f"could not get X-Plane version from {beacon_data}")
+        else:
+            self.lost_connection(who="beacon")
+            logger.warning("X-Plane beacon not received")
+
+    @property
+    def is_aircraft_loaded(self) -> bool:
+        """Returns whether aircraft is loaded
+
+        To do so, scan `sim/aircraft/view/acf_relative_path` dataref for non null value.
+        """
+        a = self.dataref_value(dataref=self._aircraft_path)
+        if a is not None and a != "":
+            self.xplane_status = XPLANE_STATUS.AIRCRAFT_LOADED
+            return True
+        # logger.info(f"{self.name}: aircraft loaded ({a})" if ret else "no aircraft")
+        return False
+
+    @property
+    def is_valid(self) -> bool:
+        """Returns whether aircraft loaded and aircraft datarefs are available"""
+        if self.has_data:
+            if self.is_aircraft_loaded:
+                logger.debug(f"{self.name}: aircraft loaded")
+                return True
+            else:
+                logger.debug(f"{self.name}: no aircraft loaded, invalid")
+        logger.debug(f"{self.name}: no meta data loaded, invalid")
+        return False
+
+    @property
+    def connected_and_valid(self) -> bool:
+        res = f"{self.name} "
+        connected = self.connected
+        valid = False
+        res = res + ("connected" if connected else "not connected")
+        if connected:
+            valid = self.is_valid
+            res = res + (", aircraft loaded" if valid else ", no aircraft loaded")
+        else:
+            self.xplane_status = XPLANE_STATUS.CONNECTED
+        logger.info(res)
+        return connected and valid
+
+    @property
+    def status_info(self) -> str:
+        return f"beacon={self._beacon.status_str}, api={self.status_str}, simulator={self.x_plane_status_str}"
+
     def dataref_newvalue_callback(self, dataref: str, value):
         cascade = dataref in self.simulator_variable_to_monitor
         # print(f"DREF {dataref}={value} ({cascade})")
@@ -1124,68 +1196,111 @@ class XPlane(XPWebsocketAPI, Simulator, SimulatorVariableListener):
         e = CommandActiveEvent(sim=self, command=command, is_active=active, cascade=True)
         self.inc(COCKPITDECKS_INTVAR.COMMAND_ACTIVE_ENQUEUED.value)
 
-    @property
-    def is_valid(self) -> bool:
-        """is_valid if aircraft datarefs are available"""
-        if self.aircraft_loaded:
-            res = f"{self.name}: "
-            d = self.all_datarefs is not None and self.all_datarefs.has_data
-            if d:
-                res = res + f"loaded {self.all_datarefs.count} dataref meta"
-            c = self.all_commands is not None and self.all_commands.has_data
-            if d:
-                res = res + f", loaded {self.all_commands.count} commands meta"
-            res = res + ", aircraft loaded, valid"
-            return d and c
-        logger.debug(f"{self.name}: no aircraft loaded, invalid")
-        return False
-
-    @property
-    def aircraft_loaded(self) -> bool:
-        a = self.dataref_value(dataref=self._aircraft_path)
-        ret = a is not None and a != ""
-        # logger.info(f"{self.name}: aircraft loaded ({a})" if ret else "no aircraft")
-        return ret
-
-    @property
-    def api_is_available(self) -> bool:
-        """Important call that checks whether API is reachable
-        API may not be reachable if:
-         - X-Plane version before 12.1.4,
-         - X-Plane is not running
-        """
-        return XPWebsocketAPI.connected(self)
-
-    def beacon_callback(self, connected: bool, beacon_data: BeaconData, same_host: bool):
-        if connected:
-            logger.info("X-Plane beacon connected")
-            if self._beacon.connected:
-                self.dynamic_timeout = 0.5  # seconds
-                self.use_rest = USE_REST and not same_host
-                new_host = "127.0.0.1"
-                new_port = DEFAULT_TCP_PORT
-                if not same_host:
-                    new_host = self._beacon.data.host
-                    new_port = REMOTE_TCP_PORT
-                xp_version = self._beacon.data.xplane_version
-                if xp_version is not None:
-                    use_rest = ", use REST" if self.use_rest else ""
-                    new_apiversion = "/v1"
-                    if xp_version >= XP_MIN_VERSION:
-                        new_apiversion = "/v2"
-                    elif xp_version < XP_MAX_VERSION:
-                        new_apiversion = ""
-                        logger.warning(f"could not set API version from {xp_version} ({self._beacon.data})")
-                    if new_apiversion != "":
-                        self.set_network(host=new_host, port=new_port, api="/api", api_version=new_apiversion)
-                        logger.info(f"XPlane API at {self.rest_url} from UDP beacon data{use_rest}")
-                else:
-                    logger.warning(f"could not get X-Plane version from {self._beacon.data}")
+    # ################################
+    # Sequence of connection
+    #
+    def wait_for_resource(self, resource: str, test: Callable, timeout: float = 3600.0) -> bool:  # wait two hours before giving up...
+        """Checks availability of sim//ac_path"""
+        logger.info(f"{self.name}: waiting for {resource}..")
+        exit = False
+        start = datetime.now()
+        self._wait_for_resource.clear()
+        while self.waiting_for_resource:
+            now = datetime.now()
+            if test():
+                self._wait_for_resource.set()
+                exit = True
+            elif (now - start).seconds > timeout:
+                logger.warning(f"..{resource} timeout..")
+                self._wait_for_resource.set()
             else:
-                logger.info("XPlane UDP beacon is not connected")
+                logger.info(f"{self.name}: ..waiting for {resource}..")
+                self._wait_for_resource.wait(WAIT_FOR_RESOURCE_TIMEOUT)
+        if exit:
+            logger.info(f"{self.name}: ..{resource} loaded")
         else:
-            logger.warning("X-Plane beacon disconnected")
+            logger.info(f"{self.name}: ..{resource} not loaded")
+        return exit
 
+    def terminate_wait_for_resource(self):
+        self._wait_for_resource.set()
+
+    @property
+    def waiting_for_resource(self) -> bool:
+        return not self._wait_for_resource.is_set()
+
+    def wait_for_beacon(self) -> bool:
+        """Checks availability of `sim/time/total_running_time_sec`"""
+
+        def test_data() -> bool:
+            if self._beacon.is_running:
+                return self._beacon.receiving_beacon
+            logger.warning("beacon not running")
+            return False
+
+        return self.wait_for_resource(resource="beacon", test=test_data)
+
+    def wait_for_restapi(self) -> bool:
+        """Checks availability of `sim/time/total_running_time_sec`"""
+
+        def test_data() -> bool:
+            return self.rest_api_reachable
+
+        return self.wait_for_resource(resource="rest api", test=test_data)
+
+    def wait_for_metadata(self) -> bool:
+        """Checks availability of `sim/time/total_running_time_sec`"""
+
+        def test_data() -> bool:
+            self.reload_caches(force=True)
+            return self.has_data
+
+        return self.wait_for_resource(resource="meta data", test=test_data)
+
+    def wait_for_websocket(self) -> bool:
+        """Checks availability of `sim/time/total_running_time_sec`"""
+
+        def test_data() -> bool:
+            if self.websocket_connection_monitor_running:
+                return self.connected
+            logger.warning("websocket connection monitor not running")
+            return False
+
+        return self.wait_for_resource(resource="websocket connection", test=test_data)
+
+    def wait_for_aircraft(self) -> bool:
+        """Checks availability of `sim/aircraft/view/acf_relative_path`"""
+
+        def test_data() -> bool:
+            self.reload_caches(force=True)
+            return self.is_aircraft_loaded
+
+        return self.wait_for_resource(resource="aircraft", test=test_data)
+
+    def lost_connection(self, who: str):
+        logger.warning("<*> "*30)
+        logger.warning(f"no answer from {who}, investigating..")
+        logger.warning(f"SHORT CIRCUITED..investigated")
+        return
+        # Do we have a beacon?
+        self.wait_for_beacon()
+
+        # Is the REST API reachable?
+        self.wait_for_restapi()
+
+        # Is meta data available in REST API?
+        self.wait_for_metadata()
+
+        # Is the Websocket available and open?
+        self.wait_for_websocket()
+
+        # Is the aircraft loade?
+        self.wait_for_aircraft()
+        logger.warning("..investigated")
+
+    # ################################
+    # Interface to XPWebsocketAPI
+    #
     def req_stats(self):
         stats = {}
         for r, v in self._requests.items():
@@ -1197,54 +1312,50 @@ class XPlane(XPWebsocketAPI, Simulator, SimulatorVariableListener):
             self._stats = stats
             logger.log(SPAM_LEVEL, f"requests statistics: {stats}")
 
-    # ################################
-    # Connection to web socket
-    #
-    @property
-    def connected_and_valid(self) -> bool:
-        res = f"{self.name} "
-        res = res + ("connected" if self.connected else "not connected")
-        if self.connected:
-            res = res + (", valid" if self.is_valid else ", no aircraft loaded")
-        logger.info(res)
-        return self.connected and self.is_valid
-
-    def wait_for_aircraft(self):
-        logger.info(f"{self.name}: waiting for aircraft..")
-        self._wait_for_aircraft.clear()
-        while not self._wait_for_aircraft.is_set():
-            self.reload_caches()
-            if self.connected_and_valid:
-                self._wait_for_aircraft.set()
-            else:
-                logger.info(f"{self.name}: ..waiting for aircraft..")
-                self._wait_for_aircraft.wait(5)
-        self._can_complain = True
-        logger.info(f"{self.name}: ..aircraft loaded")
-
-    # ################################
-    # Interface
-    #
     def _on_start(self, connected: bool):
         if not connected:
             return
+        if not self.has_data:
+            logger.warning("no data")
+            if not self.wait_for_metadata():
+                logger.warning("could not load meta data, aborting start")
+                return
+        else:
+            logger.info("meta data loaded")
+
         self.clean_simulator_variables_to_monitor()
         self.add_all_simulator_variables_to_monitor()
         self.clean_simulator_events_to_monitor()
         self.add_all_simulator_events_to_monitor()
-        logger.info("request to reload pages")
-        self.cockpit.reload_pages()  # to request page variables and take into account updated values
+
+        if not self.is_aircraft_loaded:
+            logger.info("no aircraft")
+            if not self.wait_for_aircraft():
+                logger.warning("could not load aircraft, aborting start")
+                return
+        else:
+            logger.info("aircraft loaded")
+
+        if self.is_aircraft_loaded:
+            logger.info("request to reload pages")
+            self.cockpit.reload_pages()  # to request page variables and take into account updated values
         # logger.info(f"{self.name} started")
 
     def _on_stop(self, connected: bool):
-        if not connected:
-            return
+        pass
+
+    def _on_ws_open(self):
+        pass
+
+    def _on_ws_close(self):
+        logger.warning("SHOULD RUN self.lost_connection but DISABLED")
+        # self.lost_connection(who="websocket closed")
 
     def connect(self, reload_cache: bool = False):
         """
         Starts connect loop.
         """
-        self._beacon.connect()
+        self._beacon.start_monitor()
         super().connect(reload_cache)
 
     def disconnect(self):
@@ -1252,7 +1363,7 @@ class XPlane(XPWebsocketAPI, Simulator, SimulatorVariableListener):
         End connect loop and disconnect
         """
         super().disconnect()
-        self._beacon.disconnect()
+        self._beacon.stop_monitor()
 
     def cleanup(self):
         """
@@ -1270,8 +1381,11 @@ class XPlane(XPWebsocketAPI, Simulator, SimulatorVariableListener):
         self.start()
 
     def terminate(self):
-        logger.debug(f"currently {'not ' if self.ws_event is None else ''}running. terminating..")
-        logger.info("terminating..")
+        logger.debug(f"currently {'not ' if self.websocket_listener_running else ''}running. terminating..")
+        logger.info(f"terminating {self.name}..")
+        if self.waiting_for_resource:
+            logger.info("..terminating wait for resource..")
+            self.terminate_wait_for_resource()
         # sends instructions to stop sending values/events
         logger.info("..request to stop sending value updates and events..")
         self.remove_all_simulator_variables_to_monitor()
@@ -1284,7 +1398,7 @@ class XPlane(XPWebsocketAPI, Simulator, SimulatorVariableListener):
         self.cleanup()
         logger.info("..disconnecting from simulator..")
         self.disconnect()
-        logger.info("..terminated")
+        logger.info(f"..{self.name} terminated")
 
 
 ## #################################################@
