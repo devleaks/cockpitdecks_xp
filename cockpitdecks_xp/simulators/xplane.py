@@ -1278,7 +1278,7 @@ class XPlane(XPWebsocketAPI, Simulator, SimulatorVariableListener):
         return self.wait_for_resource(resource="aircraft", test=test_data)
 
     def lost_connection(self, who: str):
-        logger.warning("<*> "*30)
+        logger.warning("<*> " * 30)
         logger.warning(f"no answer from {who}, investigating..")
         logger.warning(f"SHORT CIRCUITED..investigated")
         return
