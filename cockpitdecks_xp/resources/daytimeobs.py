@@ -40,6 +40,7 @@ class DaytimeObservable(Observable, SimulatorVariableListener):
         self._last_checked = datetime.now() - timedelta(seconds=self.check_time)
         self._last_updated = datetime.now()
         self._no_coord_warn = 0
+        self._no_date_warning = False
         self._value = 1
         self._set_dataref = simulator.get_variable(name=SimulatorVariable.internal_variable_name(path=DAYTIME), is_string=True)
         self._set_dataref.update_value(new_value=self._value, cascade=False)
@@ -67,16 +68,19 @@ class DaytimeObservable(Observable, SimulatorVariableListener):
             if (self._no_coord_warn % 10) == 0:
                 logger.warning("no coordinates")
             self._no_coord_warn = self._no_coord_warn + 1
+            self._no_date_warning = True
             return
 
         days = self.sim.get_simulator_variable_value(LOCAL_DATE)
         if days is None:
             logger.warning("no days since new year")
+            self._no_date_warning = True
             return
 
         secs = self.sim.get_simulator_variable_value(ZULU_TIME_SEC)
         if secs is None:
             logger.warning("no seconds since midnight")
+            self._no_date_warning = True
             return
 
         self._last_checked = datetime.now()
@@ -84,7 +88,7 @@ class DaytimeObservable(Observable, SimulatorVariableListener):
         dt = datetime(datetime.now().year, 1, 1, tzinfo=timezone.utc) + timedelta(days=days) + timedelta(seconds=secs)
         sr = sun.get_sunrise_time(dt)
         ss = sun.get_sunset_time(dt)
-        # https://github.com/SatAgro/suntime/issues/30
+        # See https://github.com/SatAgro/suntime/issues/30
         if sr.day != ss.day:
             ss = ss + timedelta(days=1)
         daytime = 1 if sr <= dt <= ss else 0
@@ -94,6 +98,9 @@ class DaytimeObservable(Observable, SimulatorVariableListener):
             self._value = daytime
             self._set_dataref.update_value(new_value=daytime, cascade=True)
             self._last_updated = datetime.now()
+            if self._no_date_warning:
+                self._no_date_warning = False
+                logger.info(f"{type(self).__name__} ok: at {dt}, sunrise={sr}, sunset={ss}, daytime={daytime} (nb: all times in UTC)")
             logger.info("day time" if daytime == 1 else "night time")
         else:
             logger.debug("checked, no change")
