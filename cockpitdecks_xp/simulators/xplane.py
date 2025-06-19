@@ -126,7 +126,6 @@ class Dataref(SimulatorVariable, DatarefAPI):
     def save(self):
         """Overwrites SimulatorVariable.save() to save to simulator"""
         logger.debug(f"saving {self.name}={self.value}..")
-        # logger.info(list(set(dir(SimulatorVariable)) & set(dir(DatarefAPI))))
         # for a DatarefAPI, the new value to write has to be in ._new_value
         # transfer value from Cockpitdecks SimulatorVariable.value to WebAPI Dataref.value
         self._new_value = self.value
