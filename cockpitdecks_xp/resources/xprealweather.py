@@ -10,8 +10,6 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import List, Any
 
-import requests
-
 # import io
 # from tabulate import tabulate
 from avwx import Station, Metar
@@ -41,7 +39,7 @@ class XPRealWeatherData(WeatherData):
     CLOUD_LAYERS = 3
     WIND_LAYERS = 13
 
-    def __init__(self, name: str, simulator, weather_type: str = WEATHER_LOCATION.REGION.value, update: bool = True):
+    def __init__(self, name: str, simulator: "XPlane", weather_type: str = WEATHER_LOCATION.REGION.value, update: bool = True):
         WeatherData.__init__(self, name=name, config={})
         self.simulator = simulator  # where to get data from
 
@@ -76,12 +74,6 @@ class XPRealWeatherData(WeatherData):
         if type(self.simulator) is str:  # cheat for testing
             return True
         return self.simulator.connected
-
-    @property
-    def api_url(self) -> str | None:
-        if type(self.simulator) is str:  # cheat for testing
-            return self.simulator
-        return self.simulator.api_url + "/datarefs" if self.simulator.api_url is not None else None
 
     @property
     def label(self):
@@ -179,10 +171,6 @@ class XPRealWeatherData(WeatherData):
             logger.warning("not connected")
             return False
 
-        if self.api_url is None:
-            logger.warning("no api url")
-            return False
-
         DATAREF_WEATHER = AIRCRAFT_DATAREFS if self.xp_real_weather_type == WEATHER_LOCATION.AIRCRAFT.value else REGION_DATAREFS
         DATAREF_CLOUD = DATAREF_AIRCRAFT_CLOUD if self.xp_real_weather_type == WEATHER_LOCATION.AIRCRAFT.value else DATAREF_REGION_CLOUD
         DATAREF_WIND = DATAREF_AIRCRAFT_WIND if self.xp_real_weather_type == WEATHER_LOCATION.AIRCRAFT.value else DATAREF_REGION_WIND
@@ -223,62 +211,6 @@ class XPRealWeatherData(WeatherData):
         return updated
 
     def collect_weather_datarefs(self, position_only: bool = False) -> dict:
-        DATA = "data"
-        IDENT = "id"
-        NAME = "name"
-
-        def get_all_dataref_specs(datarefs: list) -> dict | None:
-            payload = "&".join([f"filter[name]={path}" for path in datarefs])
-            response = requests.get(self.api_url, params=payload)
-            resp = response.json()
-            if DATA in resp:
-                return {d[NAME]: d for d in resp[DATA]}
-            logger.error(resp)
-            return None
-
-        def get_dataref_value_alt(path: str, DATAREF_SPECS) -> dict | None:
-            dref = DATAREF_SPECS.get(path)
-            if dref is None or IDENT not in dref:
-                logger.error(f"error for {path}")
-                return None
-            url = f"{self.api_url}/{dref[IDENT]}/value"
-            response = requests.get(url)
-            data = response.json()
-            if DATA in data:
-                return data[DATA]
-            logger.error(f"no value for {path}")
-            return None
-
-        def get_dataref_specs(path: str) -> dict | None:
-            api_url = self.api_url
-            payload = {"filter[name]": path}
-            response = requests.get(api_url, params=payload)
-            resp = response.json()
-            if DATA in resp:
-                return resp[DATA][0]
-            logger.error(resp)
-            return None
-
-        def get_dataref_id(path: str) -> int | None:
-            specs = get_dataref_specs(path)
-            if specs is not None and IDENT in specs:
-                return specs[IDENT]
-            logger.error(specs)
-            return None
-
-        def get_dataref_value(path: str):
-            dref = get_dataref_specs(path)
-            if dref is None or IDENT not in dref:
-                logger.error(f"error for {path}")
-                return None
-            url = f"{self.api_url}/{dref[IDENT]}/value"
-            response = requests.get(url)
-            data = response.json()
-            if DATA in data:
-                return data[DATA]
-            logger.error(f"no value for {path}")
-            return None
-
         WEATHER_DATAFEFS = AIRCRAFT_DATAREFS if self.xp_real_weather_type == WEATHER_LOCATION.AIRCRAFT.value else REGION_DATAREFS
         if position_only:
             WEATHER_DATAFEFS = DATAREF_LOCATION
@@ -289,12 +221,11 @@ class XPRealWeatherData(WeatherData):
             logger.info(f"collecting {self.xp_real_weather_type} weather datarefs..")
         weather_datarefs = {}
         debug = True
-        DATAREF_SPECS = get_all_dataref_specs(datarefs=WEATHER_DATAFEFS.values())
         if debug:
             print("collecting ", end="", flush=True)
         for d in WEATHER_DATAFEFS.values():
-            v = get_dataref_value_alt(d, DATAREF_SPECS)
-            weather_datarefs[d] = v
+            dref = self.simulator.dataref(path=d)
+            weather_datarefs[d] = dref.value
             # logger.debug(f"{d}={v}")
             if debug:
                 print(".", end="", flush=True)

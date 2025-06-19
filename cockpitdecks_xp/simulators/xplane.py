@@ -4,34 +4,22 @@
 from __future__ import annotations
 
 import os
-import socket
-from sys import version
 import threading
 import logging
-import json
-import base64
 
 
-from abc import ABC, abstractmethod
+from abc import ABC
+import time
 from typing import Callable, List
-from enum import Enum, IntEnum
+from enum import IntEnum
 from datetime import datetime, timedelta
 
-# Packaging is used in Cockpit to check driver versions
-from packaging.version import Version
-
-# REST API
-import requests
-
-# WEBSOCKET API
-from simple_websocket import Client, ConnectionClosed
-
 from cockpitdecks_xp import __version__
+
 from cockpitdecks import CONFIG_KW, ENVIRON_KW, SPAM_LEVEL, DEPRECATION_LEVEL, MONITOR_RESOURCE_USAGE, RESOURCES_FOLDER, OBSERVABLES_FILE, yaml
 from cockpitdecks.variable import Variable
 from cockpitdecks.strvar import StringWithVariables, Formula
 from cockpitdecks.instruction import MacroInstruction
-
 from cockpitdecks.simulator import Simulator, SimulatorEvent, SimulatorInstruction
 from cockpitdecks.simulator import SimulatorVariable, SimulatorVariableListener
 from cockpitdecks.resources.intvariables import COCKPITDECKS_INTVAR
@@ -69,16 +57,22 @@ RECONNECT_TIMEOUT = 10  # seconds, times between attempts to reconnect to X-Plan
 RECEIVE_TIMEOUT = 5  # seconds, assumes no awser if no message recevied withing that timeout
 WAIT_FOR_RESOURCE_TIMEOUT = 5
 
-DEFAULT_TCP_PORT = 8086
-REMOTE_TCP_PORT = 8080  # when adressing remote host, this is the port number of the **proxy** to X-Plane standard :8086 port
-
+# Local tested maxima
 XP_MIN_VERSION = 121400
 XP_MIN_VERSION_STR = "12.1.4"
 XP_MAX_VERSION = 121499
 XP_MAX_VERSION_STR = "12.1.4"
+API_MAX_VERSION_STR = "v2"
 
-# /api/capabilities introduced in /api/v2. Here is a default one for v1.
-V1_CAPABILITIES = {"api": {"versions": ["v1"]}, "x-plane": {"version": "12.1.1"}}
+# default values
+API_HOST = "127.0.0.1"
+API_TPC_PORT = 8086
+API_PATH = "/api"
+API_MIN_VERSION_STR = "v1"
+# see https://gist.github.com/devleaks/729bda6db10007b844111178694c7971
+# when adressing api on remote host, this is the port number of the **proxy** to X-Plane standard :8086 port
+REMOTE_TCP_PORT = 8080
+
 USE_REST = True  # force REST usage for remote access, otherwise websockets is privileged
 
 # #############################################
@@ -118,12 +112,26 @@ class Dataref(SimulatorVariable, DatarefAPI):
     """
     A Dataref is an internal value of the simulation software made accessible to outside modules,
     plugins, or other software in general.
+
+    Same attribute in both SimulatorVariable and DatarefAPI
+    # logger.debug(list(set(dir(SimulatorVariable)) & set(dir(DatarefAPI))))
+
     """
 
     def __init__(self, path: str, simulator: XPlane, is_string: bool = False):
         # Data
         SimulatorVariable.__init__(self, name=path, simulator=simulator, data_type="string" if is_string else "float")
         DatarefAPI.__init__(self, path=path, api=simulator)
+
+    def save(self):
+        """Overwrites SimulatorVariable.save() to save to simulator"""
+        logger.debug(f"saving {self.name}={self.value}..")
+        # logger.info(list(set(dir(SimulatorVariable)) & set(dir(DatarefAPI))))
+        # for a DatarefAPI, the new value to write has to be in ._new_value
+        # transfer value from Cockpitdecks SimulatorVariable.value to WebAPI Dataref.value
+        self._new_value = self.value
+        self.write()
+        logger.debug("..saved")
 
 
 # An events from X-Plane Simulator
@@ -555,12 +563,13 @@ class CommandActiveEvent(SimulatorEvent):
 # X-Plane Status
 class XPLANE_STATUS(IntEnum):
     NO_SIMULATOR = 0
-    REACHABLE = 1
-    CONNECTED = 2
-    HAS_META_DATA = 3
-    RECEIVING_DATA = 4
-    AIRCRAFT_LOADED = 5  # i.e; Has all meta data
-    MAIN_MENU = 9
+    BEACON_DETECTED = 1
+    API_REACHABLE = 2
+    MAIN_MENU = 3
+    HAS_META_DATA = 4
+    WS_CONNECTED = 5
+    RECEIVING_DATA = 6
+    AIRCRAFT_LOADED = 7  # i.e; has all meta data
 
 
 # #############################################
@@ -606,6 +615,8 @@ class XPlane(XPWebsocketAPI, Simulator, SimulatorVariableListener):
 
         self._wait_for_resource = threading.Event()
         self._wait_for_resource.set()
+        self._check_for_resource = threading.Event()
+        self._check_for_resource.set()
 
         self._dataref_by_id = {}  # {dataref-id: Dataref}
         self._max_datarefs_monitored = 0  # max(len(self._dataref_by_id))
@@ -627,10 +638,10 @@ class XPlane(XPWebsocketAPI, Simulator, SimulatorVariableListener):
         self._beacon.set_callback(self.beacon_callback)
         self.dynamic_timeout = RECONNECT_TIMEOUT
         self.xp_home = environ.get(ENVIRON_KW.SIMULATOR_HOME.value)
-        self.api_host = environ.get(ENVIRON_KW.API_HOST.value, "127.0.0.1")
-        self.api_port = environ.get(ENVIRON_KW.API_PORT.value, 8086)
-        self.api_path = environ.get(ENVIRON_KW.API_PATH.value, "/api")
-        self.api_version = environ.get(ENVIRON_KW.API_VERSION.value, "v1")
+        self.api_host = environ.get(ENVIRON_KW.API_HOST.value, API_HOST)
+        self.api_port = environ.get(ENVIRON_KW.API_PORT.value, API_TPC_PORT)
+        self.api_path = environ.get(ENVIRON_KW.API_PATH.value, API_PATH)
+        self.api_version = environ.get(ENVIRON_KW.API_VERSION.value, API_MIN_VERSION_STR)
 
         XPWebsocketAPI.__init__(self, host=self.api_host[0], port=self.api_host[1], api=self.api_path, api_version=self.api_version, use_rest=USE_REST)
         # XPWebsocketAPI callbacks
@@ -1113,22 +1124,22 @@ class XPlane(XPWebsocketAPI, Simulator, SimulatorVariableListener):
             logger.info("X-Plane beacon received")
             self.dynamic_timeout = 0.5  # seconds
             self.use_rest = USE_REST and not same_host
-            new_host = "127.0.0.1"
-            new_port = DEFAULT_TCP_PORT
+            new_host = API_HOST
+            new_port = API_TPC_PORT
             if not same_host:
                 new_host = beacon_data.host
                 new_port = REMOTE_TCP_PORT
             xp_version = beacon_data.xplane_version
             if xp_version is not None:
                 use_rest_str = ", use REST" if self.use_rest else ""
-                new_apiversion = "/v1"
+                new_apiversion = f"/{API_MIN_VERSION_STR}"
                 if xp_version >= XP_MIN_VERSION:
-                    new_apiversion = "/v2"
+                    new_apiversion = f"/{API_MAX_VERSION_STR}"
                 elif xp_version < XP_MAX_VERSION:
                     new_apiversion = ""
                     logger.warning(f"could not set API version from {xp_version} ({beacon_data})")
                 if new_apiversion != "" and (new_apiversion != self._api_version or new_host != self.host or new_port != self.new_port):
-                    network_changed = self.set_network(host=new_host, port=new_port, api="/api", api_version=new_apiversion)
+                    network_changed = self.set_network(host=new_host, port=new_port, api=API_PATH, api_version=new_apiversion)
                     logger.info(f"XPlane API at {self.rest_url} from beacon data{use_rest_str}")
                     if self.connected and network_changed:  # We need to stop/restart to take into account new network parameters
                         logger.info("resetting connection..")
@@ -1177,7 +1188,7 @@ class XPlane(XPWebsocketAPI, Simulator, SimulatorVariableListener):
             valid = self.is_valid
             res = res + (", aircraft loaded" if valid else ", no aircraft loaded")
         else:
-            self.xplane_status = XPLANE_STATUS.CONNECTED
+            self.xplane_status = XPLANE_STATUS.WS_CONNECTED
         logger.info(res)
         return connected and valid
 
@@ -1199,28 +1210,26 @@ class XPlane(XPWebsocketAPI, Simulator, SimulatorVariableListener):
     # ################################
     # Sequence of connection
     #
-    def wait_for_resource(self, resource: str, test: Callable, timeout: float = 3600.0) -> bool:  # wait two hours before giving up...
-        """Checks availability of sim//ac_path"""
-        logger.info(f"{self.name}: waiting for {resource}..")
-        exit = False
-        start = datetime.now()
-        self._wait_for_resource.clear()
-        while self.waiting_for_resource:
-            now = datetime.now()
+    def check_resource(self, resource: str, test: Callable, timeout: float = WAIT_FOR_RESOURCE_TIMEOUT):
+        self._check_for_resource.clear()
+        while not self._check_for_resource.is_set():  # loop over a micro timeout to check for resource périodically"
             if test():
-                self._wait_for_resource.set()
-                exit = True
-            elif (now - start).seconds > timeout:
-                logger.warning(f"..{resource} timeout..")
+                self._check_for_resource.set()
                 self._wait_for_resource.set()
             else:
                 logger.info(f"{self.name}: ..waiting for {resource}..")
-                self._wait_for_resource.wait(WAIT_FOR_RESOURCE_TIMEOUT)
-        if exit:
+                self._check_for_resource.wait(timeout)
+
+    def wait_for_resource(self, resource: str, test: Callable, timeout: float = 3600.0) -> bool:  # wait two hours before giving up...
+        """Checks availability of requested resource"""
+        logger.info(f"{self.name}: waiting for {resource}..")
+        self._wait_for_resource.clear()
+        self.check_resource(resource=resource, test=test, timeout=WAIT_FOR_RESOURCE_TIMEOUT)
+        if ret := self._wait_for_resource.wait(timeout):
             logger.info(f"{self.name}: ..{resource} loaded")
         else:
             logger.info(f"{self.name}: ..{resource} not loaded")
-        return exit
+        return ret
 
     def terminate_wait_for_resource(self):
         self._wait_for_resource.set()
@@ -1284,18 +1293,23 @@ class XPlane(XPWebsocketAPI, Simulator, SimulatorVariableListener):
         return
         # Do we have a beacon?
         self.wait_for_beacon()
+        self.xplane_status = XPLANE_STATUS.BEACON_DETECTED
 
         # Is the REST API reachable?
         self.wait_for_restapi()
+        self.xplane_status = XPLANE_STATUS.API_REACHABLE
 
         # Is meta data available in REST API?
         self.wait_for_metadata()
+        self.xplane_status = XPLANE_STATUS.HAS_META_DATA
 
         # Is the Websocket available and open?
         self.wait_for_websocket()
+        self.xplane_status = XPLANE_STATUS.WS_CONNECTED
 
         # Is the aircraft loade?
         self.wait_for_aircraft()
+        self.xplane_status = XPLANE_STATUS.AIRCRAFT_LOADED
         logger.warning("..investigated")
 
     # ################################
@@ -1370,15 +1384,9 @@ class XPlane(XPWebsocketAPI, Simulator, SimulatorVariableListener):
         Called when before disconnecting.
         Just before disconnecting, we try to cancel dataref UDP reporting in X-Plane
         """
-        logger.info("..requesting to stop websocket emission..")
+        logger.info("..requesting X-Plane to stop sending updates..")
         self.clean_simulator_variables_to_monitor()
         self.clean_simulator_events_to_monitor()
-
-    def reset_connection(self):
-        self.stop()
-        self.disconnect()
-        self.connect()
-        self.start()
 
     def terminate(self):
         logger.debug(f"currently {'not ' if self.websocket_listener_running else ''}running. terminating..")

@@ -50,13 +50,15 @@ dependencies = [
     "xpwebapi @ git+https://github.com/devleaks/xplane-webapi.git",
     "metar~=1.11.0",
     "avwx-engine~=1.9.0",
-    "requests~=2.32.3",
-    "tabulate~=0.9.0",
-    "ifaddr"
 ]
 
 dynamic = [
     "version"
+]
+
+[project.optional-dependencies]
+development = [
+    "tabulate~=0.9.0"
 ]
 
 [project.urls]
