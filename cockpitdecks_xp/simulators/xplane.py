@@ -27,9 +27,9 @@ from cockpitdecks.observable import Observables, Observable
 from cockpitdecks.cockpit import CockpitInstruction
 
 # from ..resources.beacon import XPlaneBeacon, BEACON_DATA_KW
-from xpwebapi import beacon as XPlaneBeacon, BeaconData
+from xpwebapi import beacon as XPlaneBeacon, DATAREF_DATATYPE
 from xpwebapi.api import Dataref as DatarefAPI, Command as CommandAPI
-from xpwebapi.ws import XPWebsocketAPI
+from xpwebapi.ws import XPWebsocketAPI, CALLBACK_TYPE
 from ..resources.daytimeobs import DaytimeObservable
 
 logger = logging.getLogger(__name__)
@@ -131,6 +131,30 @@ class Dataref(SimulatorVariable, DatarefAPI):
         self._new_value = self.value
         self.write()
         logger.debug("..saved")
+
+    @property
+    def value(self):
+        #
+        #
+        # TEMPORARY ADJUSTMENT FOR DATA/BYTES/TEXT DATAREF
+        #
+        #
+        encoding = "ascii"
+        value_bytes = super().value
+        if type(value_bytes) is bytes and self.value_type == DATAREF_DATATYPE.DATA.value:
+            value_bytes_stripped = value_bytes.rstrip(b'\x00')  # remove trailing 0 (bytes with value 0)
+            if len(value_bytes_stripped) > 0:
+                value_bytes = value_bytes_stripped
+            if self._encoding is not None and self._encoding != encoding:
+                logger.warning(f"string value encodings differ {self._encoding} vs {encoding}")
+            try:
+                value = value_bytes.decode(encoding)
+                value = value.replace("\u0000", "")  # remove trailing 0 (bytes with value 0)
+                self._encoding = encoding
+                return value
+            except:
+                logger.warning(f"could not decode value {value_bytes} with encoding {encoding}", exc_info=True)
+        return value_bytes
 
 
 # An events from X-Plane Simulator
@@ -644,12 +668,12 @@ class XPlane(XPWebsocketAPI, Simulator, SimulatorVariableListener):
 
         XPWebsocketAPI.__init__(self, host=self.api_host[0], port=self.api_host[1], api=self.api_path, api_version=self.api_version, use_rest=USE_REST)
         # XPWebsocketAPI callbacks
-        self.after_on_start = self._on_start
-        self.before_on_stop = self._on_stop
-        self.on_dataref_update = self.dataref_newvalue_callback
-        self.on_command_active = self.command_active_callback
-        self.on_open = self._on_ws_open
-        self.on_close = self._on_ws_close
+        self.add_callback(cbtype=CALLBACK_TYPE.ON_DATAREF_UPDATE, callback=self.dataref_newvalue_callback)
+        self.add_callback(cbtype=CALLBACK_TYPE.ON_COMMAND_ACTIVE, callback=self.command_active_callback)
+        self.add_callback(cbtype=CALLBACK_TYPE.ON_OPEN, callback=self._on_ws_open)
+        self.add_callback(cbtype=CALLBACK_TYPE.ON_CLOSE, callback=self._on_ws_close)
+        self.add_callback(cbtype=CALLBACK_TYPE.AFTER_START, callback=self._on_start)
+        self.add_callback(cbtype=CALLBACK_TYPE.BEFORE_STOP, callback=self._on_stop)
 
         self.init()
 
@@ -1116,42 +1140,6 @@ class XPlane(XPWebsocketAPI, Simulator, SimulatorVariableListener):
         self._max_events_monitored = max(self._max_events_monitored, len(self.cmdevents))
         logger.log(SPAM_LEVEL, f">>>>> add_all_simulator_events_to_monitor: added {paths}")
 
-    # Websocket API interface
-    #
-    def beacon_callback(self, connected: bool, beacon_data: BeaconData, same_host: bool):
-        if connected:
-            logger.info("X-Plane beacon received")
-            self.dynamic_timeout = 0.5  # seconds
-            self.use_rest = USE_REST and not same_host
-            new_host = API_HOST
-            new_port = API_TPC_PORT
-            if not same_host:
-                new_host = beacon_data.host
-                new_port = REMOTE_TCP_PORT
-            xp_version = beacon_data.xplane_version
-            if xp_version is not None:
-                use_rest_str = ", use REST" if self.use_rest else ""
-                new_apiversion = f"/{API_MIN_VERSION_STR}"
-                if xp_version >= XP_MIN_VERSION:
-                    new_apiversion = f"/{API_MAX_VERSION_STR}"
-                elif xp_version < XP_MAX_VERSION:
-                    new_apiversion = ""
-                    logger.warning(f"could not set API version from {xp_version} ({beacon_data})")
-                if new_apiversion != "" and (new_apiversion != self._api_version or new_host != self.host or new_port != self.new_port):
-                    network_changed = self.set_network(host=new_host, port=new_port, api=API_PATH, api_version=new_apiversion)
-                    logger.info(f"XPlane API at {self.rest_url} from beacon data{use_rest_str}")
-                    if self.connected and network_changed:  # We need to stop/restart to take into account new network parameters
-                        logger.info("resetting connection..")
-                        self.reset_connection()
-                        logger.info("..connection reset")
-                else:
-                    logger.warning("no API version, no change")
-            else:
-                logger.warning(f"could not get X-Plane version from {beacon_data}")
-        else:
-            self.lost_connection(who="beacon")
-            logger.warning("X-Plane beacon not received")
-
     @property
     def is_aircraft_loaded(self) -> bool:
         """Returns whether aircraft is loaded
@@ -1288,8 +1276,7 @@ class XPlane(XPWebsocketAPI, Simulator, SimulatorVariableListener):
     def lost_connection(self, who: str):
         logger.warning("<*> " * 30)
         logger.warning(f"no answer from {who}, investigating..")
-        logger.warning(f"SHORT CIRCUITED..investigated")
-        return
+
         # Do we have a beacon?
         self.wait_for_beacon()
         self.xplane_status = XPLANE_STATUS.BEACON_DETECTED
@@ -1309,6 +1296,7 @@ class XPlane(XPWebsocketAPI, Simulator, SimulatorVariableListener):
         # Is the aircraft loade?
         self.wait_for_aircraft()
         self.xplane_status = XPLANE_STATUS.AIRCRAFT_LOADED
+
         logger.warning("..investigated")
 
     # ################################
@@ -1361,8 +1349,7 @@ class XPlane(XPWebsocketAPI, Simulator, SimulatorVariableListener):
         pass
 
     def _on_ws_close(self):
-        logger.warning("SHOULD RUN self.lost_connection but DISABLED")
-        # self.lost_connection(who="websocket closed")
+        self.lost_connection(who="websocket closed")
 
     def connect(self, reload_cache: bool = False):
         """
@@ -1388,7 +1375,7 @@ class XPlane(XPWebsocketAPI, Simulator, SimulatorVariableListener):
         self.clean_simulator_events_to_monitor()
 
     def terminate(self):
-        logger.debug(f"currently {'not ' if self.websocket_listener_running else ''}running. terminating..")
+        logger.debug(f"{'currently not ' if self.websocket_listener_running else ''}running.. terminating..")
         logger.info(f"terminating {self.name}..")
         if self.waiting_for_resource:
             logger.info("..terminating wait for resource..")
