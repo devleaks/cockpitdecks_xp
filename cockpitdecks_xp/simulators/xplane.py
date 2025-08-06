@@ -6,10 +6,7 @@ from __future__ import annotations
 import os
 import threading
 import logging
-
-
 from abc import ABC
-import time
 from typing import Callable, List
 from enum import IntEnum
 from datetime import datetime, timedelta
@@ -142,7 +139,7 @@ class Dataref(SimulatorVariable, DatarefAPI):
         encoding = "ascii"
         value_bytes = super().value
         if type(value_bytes) is bytes and self.value_type == DATAREF_DATATYPE.DATA.value:
-            value_bytes_stripped = value_bytes.rstrip(b'\x00')  # remove trailing 0 (bytes with value 0)
+            value_bytes_stripped = value_bytes.rstrip(b"\x00")  # remove trailing 0 (bytes with value 0)
             if len(value_bytes_stripped) > 0:
                 value_bytes = value_bytes_stripped
             if self._encoding is not None and self._encoding != encoding:
@@ -388,7 +385,7 @@ class XPlaneInstruction(SimulatorInstruction, ABC):
 
 # Instructions to simulator
 #
-class Command(CommandAPI, XPlaneInstruction):
+class Command(XPlaneInstruction, CommandAPI):
     """
     X-Plane simple Command, executed by CommandOnce API.
     """
@@ -640,6 +637,7 @@ class XPlane(XPWebsocketAPI, Simulator, SimulatorVariableListener):
         self._wait_for_resource.set()
         self._check_for_resource = threading.Event()
         self._check_for_resource.set()
+        self._terminating = False
 
         self._dataref_by_id = {}  # {dataref-id: Dataref}
         self._max_datarefs_monitored = 0  # max(len(self._dataref_by_id))
@@ -1274,6 +1272,9 @@ class XPlane(XPWebsocketAPI, Simulator, SimulatorVariableListener):
         return self.wait_for_resource(resource="aircraft", test=test_data)
 
     def lost_connection(self, who: str):
+        if self._terminating:
+            logger.info(f"connection lost while terminating")
+            return
         logger.warning("<*> " * 30)
         logger.warning(f"no answer from {who}, investigating..")
 
@@ -1349,12 +1350,14 @@ class XPlane(XPWebsocketAPI, Simulator, SimulatorVariableListener):
         pass
 
     def _on_ws_close(self):
-        self.lost_connection(who="websocket closed")
+        if not self._terminating:
+            self.lost_connection(who="websocket closed")
 
     def connect(self, reload_cache: bool = False):
         """
         Starts connect loop.
         """
+        self._terminating = False
         self._beacon.start_monitor()
         super().connect(reload_cache)
 
@@ -1362,6 +1365,7 @@ class XPlane(XPWebsocketAPI, Simulator, SimulatorVariableListener):
         """
         End connect loop and disconnect
         """
+        self._terminating = True
         super().disconnect()
         self._beacon.stop_monitor()
 
@@ -1377,6 +1381,7 @@ class XPlane(XPWebsocketAPI, Simulator, SimulatorVariableListener):
     def terminate(self):
         logger.debug(f"{'currently not ' if self.websocket_listener_running else ''}running.. terminating..")
         logger.info(f"terminating {self.name}..")
+        self._terminating = True
         if self.waiting_for_resource:
             logger.info("..terminating wait for resource..")
             self.terminate_wait_for_resource()

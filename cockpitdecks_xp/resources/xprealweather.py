@@ -220,7 +220,7 @@ class XPRealWeatherData(WeatherData):
         else:
             logger.info(f"collecting {self.xp_real_weather_type} weather datarefs..")
         weather_datarefs = {}
-        debug = True
+        debug = False
         if debug:
             print("collecting ", end="", flush=True)
         for d in WEATHER_DATAFEFS.values():
