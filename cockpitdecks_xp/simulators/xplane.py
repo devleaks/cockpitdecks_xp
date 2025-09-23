@@ -1196,8 +1196,11 @@ class XPlane(XPWebsocketAPI, Simulator, SimulatorVariableListener):
     # Sequence of connection
     #
     def check_resource(self, resource: str, test: Callable, timeout: float = WAIT_FOR_RESOURCE_TIMEOUT):
+        if self._terminating:
+            logger.info(f"{self.name}: terminating, not checking for {resource}..")
+            return
         self._check_for_resource.clear()
-        while not self._check_for_resource.is_set():  # loop over a micro timeout to check for resource périodically"
+        while not self._check_for_resource.is_set() and not self._terminating:  # loop over a micro timeout to check for resource périodically"
             if test():
                 self._check_for_resource.set()
                 self._wait_for_resource.set()
@@ -1207,6 +1210,9 @@ class XPlane(XPWebsocketAPI, Simulator, SimulatorVariableListener):
 
     def wait_for_resource(self, resource: str, test: Callable, timeout: float = 3600.0) -> bool:  # wait two hours before giving up...
         """Checks availability of requested resource"""
+        if self._terminating:
+            logger.info(f"{self.name}: terminating, not waiting for {resource}..")
+            return False
         logger.info(f"{self.name}: waiting for {resource}..")
         self._wait_for_resource.clear()
         self.check_resource(resource=resource, test=test, timeout=WAIT_FOR_RESOURCE_TIMEOUT)
