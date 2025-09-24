@@ -92,6 +92,7 @@ AIR_AGL_MARGIN = 30  # meters
 
 EPOCH = datetime(year=1970, month=1, day=1, hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
 
+
 def now():
     return datetime.now(timezone.utc)
 
@@ -218,6 +219,7 @@ class OOOIObservable(Observable, SimulatorVariableListener):
         Returns:
             str: string with all values
         """
+
         def strfdelta(tdelta):
             ret = ""
             if tdelta.days > 0:
