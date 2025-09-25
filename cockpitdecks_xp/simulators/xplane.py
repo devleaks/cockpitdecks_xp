@@ -132,27 +132,13 @@ class Dataref(SimulatorVariable, DatarefAPI):
     @property
     def value(self):
         #
-        #
         # TEMPORARY ADJUSTMENT FOR DATA/BYTES/TEXT DATAREF
         #
-        #
-        encoding = "ascii"
-        value_bytes = super().value
-        if type(value_bytes) is bytes and self.value_type == DATAREF_DATATYPE.DATA.value:
-            value_bytes_stripped = value_bytes.rstrip(b"\x00")  # remove trailing 0 (bytes with value 0)
-            if len(value_bytes_stripped) > 0:
-                value_bytes = value_bytes_stripped
-            if self._encoding is not None and self._encoding != encoding:
-                logger.warning(f"string value encodings differ {self._encoding} vs {encoding}")
-            try:
-                value = value_bytes.decode(encoding)
-                value = value.replace("\u0000", "")  # remove trailing 0 (bytes with value 0)
-                self._encoding = encoding
-                return value
-            except:
-                logger.warning(f"could not decode value {value_bytes} with encoding {encoding}", exc_info=True)
-        return value_bytes
-
+        self._encoding = "ascii" if self._encoding is None else self._encoding
+        # https://stackoverflow.com/questions/1021464/how-to-call-a-property-of-the-base-class-if-this-property-is-being-overwritten-i
+        if type(DatarefAPI.value.fget(self)) is bytes and self.value_type == DATAREF_DATATYPE.DATA.value:
+            return self.get_string_value(self._encoding)
+        return super().value
 
 # An events from X-Plane Simulator
 #
@@ -506,10 +492,11 @@ class SetDataref(XPlaneInstruction):
 
     def _execute(self) -> bool:
         """Execute command through API supplied at creation"""
+        logger.debug(f"{self.path}={self.value} ({self._variable.listeners})")
         if not self.valid:
             logger.error(f"set dataref command is invalid ({self.path})")
             return False
-        self._variable.value = self.value
+        self._variable.update_value(new_value=self.value, cascade=True)
         if isinstance(self._variable, Dataref):
             return self._variable.write()
         return True
@@ -841,7 +828,7 @@ class XPlane(XPWebsocketAPI, Simulator, SimulatorVariableListener):
         more = self.cockpit.get_activities()
         if len(more) > 0:
             ret = ret | more
-        # Aircraft variables
+        # Aircraft activities
         if self.is_aircraft_loaded:
             more = self.cockpit.aircraft.get_activities()
             if len(more) > 0:
@@ -1144,7 +1131,7 @@ class XPlane(XPWebsocketAPI, Simulator, SimulatorVariableListener):
 
         To do so, scan `sim/aircraft/view/acf_relative_path` dataref for non null value.
         """
-        a = self.dataref_value(dataref=self._aircraft_path)
+        a = self._aircraft_path.value
         if a is not None and a != "":
             self.xplane_status = XPLANE_STATUS.AIRCRAFT_LOADED
             return True
