@@ -140,6 +140,7 @@ class Dataref(SimulatorVariable, DatarefAPI):
             return self.get_string_value(self._encoding)
         return super().value
 
+
 # An events from X-Plane Simulator
 #
 class DatarefEvent(SimulatorEvent):
