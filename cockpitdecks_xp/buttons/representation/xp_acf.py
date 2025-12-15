@@ -1,5 +1,4 @@
-"""X-Plane Aircraft Information Icon
-"""
+"""X-Plane Aircraft Information Icon"""
 
 import logging
 
@@ -16,8 +15,6 @@ class Aircraft(IconText):
     """
 
     REPRESENTATION_NAME = "aircraft"
-
-    PARAMETERS = {}
 
     def __init__(self, button: "Button"):
         IconText.__init__(self, button=button)
