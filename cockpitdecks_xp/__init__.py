@@ -7,4 +7,4 @@ from datetime import datetime
 __NAME__ = "cockpitdecks_xp"
 __COPYRIGHT__ = f"© 2022-{datetime.now().strftime('%Y')} Pierre M <pierre@devleaks.be>"
 
-__version__ = "5.4.0"
+__version__ = "5.4.1"

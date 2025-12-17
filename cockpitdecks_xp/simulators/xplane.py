@@ -698,6 +698,10 @@ class XPlane(XPWebsocketAPI, Simulator, SimulatorVariableListener):
             self._xplane_status = xplane_status
             logger.info(f"X-Plane status is now {self.xplane_status_str}")
 
+    def set_simulator_variable_roundings(self, simulator_variable_roundings: dict):
+        self.roundings = self.roundings | simulator_variable_roundings
+        self.set_roundings(self.roundings)  # set X-Plane Web API roundings
+
     # ################################
     # Factories
     #
